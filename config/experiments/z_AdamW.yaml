@@ -1,0 +1,13 @@
+scheduler:
+  batch_step: True
+  name: OneCycleLR
+  milestones: [30]
+  gamma: 0.2
+  pct_start: 0.1
+  steps_per_epoch: 1
+
+optimizer:
+  learning_rate: 0.0005
+  name: AdamW
+  weight_decay: 0.01 # 0 # 0.00005
+  momentum: None

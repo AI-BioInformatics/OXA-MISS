@@ -1,0 +1,63 @@
+title: abmil_alltissues
+project_dir: '/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/results'
+seed: 42
+
+wandb:
+  mode: online
+
+data_loader:
+  datasets_configs: ["/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/config/Decider_dataset.yaml"]
+  max_patches: 4096
+  batch_size: 4
+  real_batch_size: 8
+  n_bins: 4
+  sample: True
+  label_name: "FUT"
+  censorships_name: "Survival"
+  eps: 0.000001
+  num_workers: 8
+  train_size: 0.7
+  val_size: 0.15
+  test_size: 0.15
+  random_state: 42
+  preprocessing: /work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/config/preprocessing.yaml
+  augmentation: /work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/config/augmentation.yaml
+
+model:
+  name: ABMIL
+  pretrained: False # False # True
+  kwargs:
+    d_model: 1024
+    output_dim: 4
+  device: cuda
+
+loss:
+  name: NLLSurvLoss
+  kwargs:
+    alpha: 0.0
+    eps: 0.0000001
+    reduction: 'sum'
+
+scheduler:
+  batch_step: True
+  name: OneCycleLR
+  milestones: [30]
+  gamma: 0.2
+  pct_start: 0.1
+  steps_per_epoch: 1
+
+optimizer:
+  learning_rate: 0.00005
+  name: AdamW
+  weight_decay: 0.01 # 0 # 0.00005
+  momentum: None
+
+trainer:
+  reload: False
+  checkpoint: ''
+  do_train: True
+  do_train: True
+  do_test: False
+  do_inference: False
+  epochs: 300
+  patience: 30

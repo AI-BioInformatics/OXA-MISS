@@ -1,0 +1,106 @@
+case_id	slide_id	Treatment_Response_True_Label	Treatment_Response	FUT	Survival_True_Label	Survival	PFI	PFS
+D331	D331_pOme2_JL_PL_HE	Ctrl_responsive	1	1140	Alive	1	995.0	1140.0
+D331	D331_pOme1_DE_rct	Ctrl_responsive	1	1140	Alive	1	995.0	1140.0
+D331	D331_pOme1_DE_HE	Ctrl_responsive	1	1140	Alive	1	995.0	1140.0
+D335	D335_pOme1_JL_PL_HE	Ctrl_responsive	1	807	Dead	0	209.0	357.0
+D335	D335_pOme1_DE_HE	Ctrl_responsive	1	807	Dead	0	209.0	357.0
+D341	D341_pOme1_DE_HE	Ctrl_responsive	1	576	Dead	0	238.0	392.0
+D341	D341_pOme_PE_II_HE	Ctrl_responsive	1	576	Dead	0	238.0	392.0
+D351	D351_p2Ome2_PE_C_HE	Ctrl_responsive	1	979	Alive	1	761.0	979.0
+D351	D351_p2Ome2_PE_D_HE	Ctrl_responsive	1	979	Alive	1	761.0	979.0
+D351	D351_p2Ome1_DE_HE	Ctrl_responsive	1	979	Alive	1	761.0	979.0
+D351	D351_pOme3_JL_APL_HE	Ctrl_responsive	1	979	Alive	1	761.0	979.0
+D351	D351_pOme3_JL_BFO_HE	Ctrl_responsive	1	979	Alive	1	761.0	979.0
+D351	D351_pOme2_PE_ _HE	Ctrl_responsive	1	979	Alive	1	761.0	979.0
+D351	D351_p2Ome2_PE_A_HE	Ctrl_responsive	1	979	Alive	1	761.0	979.0
+D351	D351_p2Ome2_PE_B_HE	Ctrl_responsive	1	979	Alive	1	761.0	979.0
+D351	D351_pOme1_DE_HE	Ctrl_responsive	1	979	Alive	1	761.0	979.0
+D370	D370_p0Ome_PE__HE	refractory_IDS	0	811	Alive	1	20.0	186.0
+D411	D411_p2Ome_PE_IA_HE	refractory_new	0	233	Dead	0	22.0	140.0
+D411	D411_pOme2_JL_B_HE	refractory_new	0	233	Dead	0	22.0	140.0
+D411	D411_p2Ome_PE_IC_HE	refractory_new	0	233	Dead	0	22.0	140.0
+D411	D411_p2Ome_PE_IB_HE	refractory_new	0	233	Dead	0	22.0	140.0
+D411	D411_pOme2_JL_A_HE	refractory_new	0	233	Dead	0	22.0	140.0
+D411	D411_pOme1_DE_HE	refractory_new	0	233	Dead	0	22.0	140.0
+H021	H021_pOme_PE_ _HE_rct-rscn	Ctrl_responsive	1	1610	Dead	0	974.0	1128.0
+H021	H021_pOme_PE_ _HE	Ctrl_responsive	1	1610	Dead	0	974.0	1128.0
+H040	H040_pOme_PE_B_HE_2021-12-17_13-43-28	Ctrl_responsive	1	3001	Alive	1	585.0	740.0
+H040	H040_pOme_PE_A_HE_2021-12-17_13-36-46	Ctrl_responsive	1	3001	Alive	1	585.0	740.0
+H046	H046_pOme _PE_II_HE	Ctrl_responsive	1	1373	Dead	0	826.0	986.0
+H083	H083_pOme_JL_B_HE	Ctrl_responsive	1	1494	Dead	0	797.0	965.0
+H083	H083_pOme_JL_A_HE	Ctrl_responsive	1	1494	Dead	0	797.0	965.0
+H083	H083_pOme_JL_C_HE	Ctrl_responsive	1	1494	Dead	0	797.0	965.0
+H085	H085_pOme_PE_II_HE	refractory_noIDS	0	47	Dead	0	13.0	40.0
+H089	H089_pOme_PE_BFO_HE_rscn	Ctrl_responsive	1	923	Dead	0	280.0	453.0
+H089	H089_pOme_PE_APL_HE	Ctrl_responsive	1	923	Dead	0	280.0	453.0
+H089	H089_pOme_PE_BFO_HE	Ctrl_responsive	1	923	Dead	0	280.0	453.0
+H094	H094_pOme_PE_IV_HE	Ctrl_responsive	1	2623	Alive	1	210.0	355.0
+H096	H096_pOme_PE_I_HE	refractory_noIDS	0	440	Dead	0	25.0	68.0
+H103	H103_pOme_PE_I_HE	Ctrl_responsive_noIDS	1	931	Dead	0	208.0	424.0
+H106	H106_pOme_PE_A_HE	refractory_noIDS	0	402	Dead	0	2.0	223.0
+H106	H106_pOme_PE_B_HE	refractory_noIDS	0	402	Dead	0	2.0	223.0
+H112	H112_pOme_PE_II_HE	Ctrl_responsive	1	1686	Dead	0	460.0	701.0
+H114	H114_pOme_PE_ _HE	Ctrl_responsive	1	860	Dead	0	706.0	860.0
+H142	H142_pOme_PE_ _HE_rct-rscn	refractory_IDS	0	548	Dead	0	14.0	236.0
+H142	H142_pOme_PE_ _HE	refractory_IDS	0	548	Dead	0	14.0	236.0
+H144	H144_pOme_PE_II_HE	refractory_noIDS	0	268	Dead	0	30.0	78.0
+H144	H144_pOme1_xO_PE_HE	refractory_noIDS	0	268	Dead	0	30.0	78.0
+H144	H144_pOme1_xO_PE_HE_rct-rscn	refractory_noIDS	0	268	Dead	0	30.0	78.0
+H173	H173_pOme_PE_II_HE	Ctrl_responsive	1	1227	Dead	0	393.0	534.0
+H173	H173_pOme_PE_II_HE_2	Ctrl_responsive	1	1227	Dead	0	393.0	534.0
+H182	H182_pOme2_cO_PE_HE	Ctrl_responsive	1	2183	Alive	1	292.0	473.0
+H182	H182_pOme2_cO_PE_HE_rct-rscn	Ctrl_responsive	1	2183	Alive	1	292.0	473.0
+H182	H182_pOme1_cO_PE_HE	Ctrl_responsive	1	2183	Alive	1	292.0	473.0
+H201	H201_pOme_PE_II_HE	Ctrl_responsive	1	1065	Dead	0	291.0	470.0
+H201	H201_pOme_PE_II_HE_rscn	Ctrl_responsive	1	1065	Dead	0	291.0	470.0
+H215	H215_pOme_JL_PL_HE	Ctrl_responsive	1	676	Dead	0	230.0	377.0
+H215	H215_pOme_JL_PL_HE_rscn	Ctrl_responsive	1	676	Dead	0	230.0	377.0
+H228	H228_pOme1_x_PE_HE	Ctrl_responsive	1	1378	Dead	0	329.0	537.0
+H228	H228_pOme_PE__HE	Ctrl_responsive	1	1378	Dead	0	329.0	537.0
+H228	H228_pOme1_x_PE__HE_rct-rscn	Ctrl_responsive	1	1378	Dead	0	329.0	537.0
+H228	H228_pOme2_cO_PE_HE	Ctrl_responsive	1	1378	Dead	0	329.0	537.0
+H228	H228_pOme2_cO_PE_HE_rct-rscn	Ctrl_responsive	1	1378	Dead	0	329.0	537.0
+H231	H231_pOme_PE_B_HE	refractory_IDS	0	810	Dead	0	25.0	179.0
+H231	H231_pOme_PE_A_HE	refractory_IDS	0	810	Dead	0	25.0	179.0
+H243	H243_pOme_PE_IIC_HE	Ctrl_responsive	1	1799	Alive	1	685.0	838.0
+H243	H243_pOme_PE_IIE_HE	Ctrl_responsive	1	1799	Alive	1	685.0	838.0
+H243	H243_pOme_PE_IID_HE	Ctrl_responsive	1	1799	Alive	1	685.0	838.0
+H243	H243_pOme_PE_IIA_HE	Ctrl_responsive	1	1799	Alive	1	685.0	838.0
+H243	H243_pOme_PE_IIB_HE	Ctrl_responsive	1	1799	Alive	1	685.0	838.0
+H245	H245_pOme_PE_ _HE	Ctrl_responsive	1	1038	Dead	0	436.0	588.0
+H249	H249_pOme_PE_ _HE	Ctrl_responsive	1	711	Dead	0	498.0	671.0
+H281	H281_pOme_PE_II_HE	Ctrl_responsive	1	984	Dead	0	307.0	475.0
+H292	H292_pOme_PE_IIA_HE	refractory_noIDS	0	911	Dead	0	42.0	93.0
+H292	H292_pOme_PE_IIB_HE	refractory_noIDS	0	911	Dead	0	42.0	93.0
+H299	H299_pOme_JL_APL_HE	Ctrl_responsive	1	519	Dead	0	344.0	519.0
+H299	H299_pOme_JL_BFO_HE	Ctrl_responsive	1	519	Dead	0	344.0	519.0
+H307	H307_pOme2_PE_I_HE	refractory_noIDS	0	412	Dead	0	24.0	147.0
+H307	H307_pOme1_JL_A_HE	refractory_noIDS	0	412	Dead	0	24.0	147.0
+H307	H307_pOme1_JL_B_HE	refractory_noIDS	0	412	Dead	0	24.0	147.0
+H314	H314_pOme_PE_IIB_HE	refractory_noIDS	0	718	Dead	0	7.0	63.0
+H314	H314_pOme_JL_IBFO_HE	refractory_noIDS	0	718	Dead	0	7.0	63.0
+H314	H314_pOme_JL_ICFO_HE	refractory_noIDS	0	718	Dead	0	7.0	63.0
+H314	H314_pOme_PE_IIC_HE	refractory_noIDS	0	718	Dead	0	7.0	63.0
+H314	H314_pOme_PE_IIA_HE	refractory_noIDS	0	718	Dead	0	7.0	63.0
+H314	H314_pOme_JL_IIFO_HE	refractory_noIDS	0	718	Dead	0	7.0	63.0
+H314	H314_pOme_JL_IAPL_HE	refractory_noIDS	0	718	Dead	0	7.0	63.0
+M012	M012_pOme_PE_VIII_HE	Ctrl_responsive	1	859	Dead	0	273.0	490.0
+M014	M014_pOme_PE_IV_HE	Ctrl_responsive	1	1360	Dead	0	212.0	525.0
+M030	M030_pOme_PE_IV_HE	Ctrl_responsive	1	1868	Dead	0	1732.0	1868.0
+M032	M032_pOme_PE_III_HE	Ctrl_responsive	1	1008	Dead	0	275.0	475.0
+M033	M033_pOme_PE_I_HE	refractory_noIDS	0	583	Dead	0	-8.0	333.0
+M039	M039_pOme_PE_IV_HE	refractory_noIDS	0	171	Dead	0	27.0	73.0
+M040	M040_pOme_PE_II_HE	Ctrl_responsive	1	2111	Dead	0	375.0	599.0
+M049	M049_pOme_PE_V_HE	Ctrl_responsive	1	1361	Dead	0	360.0	569.0
+M056	M056_pOme_PE_II_HE	Ctrl_responsive	1	2115	Dead	0	283.0	421.0
+M058	M058_pOme_PE_B_HE	refractory_IDS	0	414	Dead	0	0.0	209.0
+M058	M058_pOme_PE_A_HE_rct-rscn	refractory_IDS	0	414	Dead	0	0.0	209.0
+M058	M058_pOme_PE_B_HE_rct-rscn	refractory_IDS	0	414	Dead	0	0.0	209.0
+M058	M058_pOme_PE_A_HE	refractory_IDS	0	414	Dead	0	0.0	209.0
+M058	M058_pOme_PE_A_HE_rscn	refractory_IDS	0	414	Dead	0	0.0	209.0
+M059	M059_pOme_PE_II_HE	Ctrl_responsive	1	4330	Alive	1	4178.0	4330.0
+M071	M071_pOme_PE_IB_HE	refractory_noIDS	0	816	Dead	0	35.0	91.0
+M071	M071_pOme_PE_IA_HE	refractory_noIDS	0	816	Dead	0	35.0	91.0
+M071	M071_pOme_PE_ID_HE	refractory_noIDS	0	816	Dead	0	35.0	91.0
+M071	M071_pOme_PE_IE_HE	refractory_noIDS	0	816	Dead	0	35.0	91.0
+M071	M071_pOme_PE_IC_HE	refractory_noIDS	0	816	Dead	0	35.0	91.0

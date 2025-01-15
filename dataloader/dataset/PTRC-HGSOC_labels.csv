@@ -1,0 +1,121 @@
+case_id	Treatment_Response_True_Label	Treatment_Response	Tumor location	Tumor type	Tumor tissue	slide_id
+1	sensitive	1	Omentum	Metastatic	Ome	1_Ome_1009484_171020_ImageActual
+1	sensitive	1	Omentum	Metastatic	Ome	1_Ome_1009485_171131_ImageActual
+10	refractory	0	Omentum	Metastatic	Ome	10_Ome_1009493_171034_ImageActual
+10	refractory	0	Omentum	Metastatic	Ome	10_Ome_1009492_171048_ImageActual
+12	sensitive	1	Omentum	Metastatic	Ome	12_Ome_1009496_171093_ImageActual
+12	sensitive	1	Omentum	Metastatic	Ome	12_Ome_1009497_416639_ImageActual
+13136	refractory	0	omental cake	Metastatic	Ome	13136_Ome_1009595_269104_ImageActual
+13136	refractory	0	omental cake	Metastatic	Ome	13136_Ome_1009596_269105_ImageActual
+15	refractory	0	Omentum	Metastatic	Ome	15_Ome_1009412_171005_ImageActual
+15	refractory	0	Omentum	Metastatic	Ome	15_Ome_1009413_170999_ImageActual
+1711	sensitive	1	omentum	Metastatic	Ome	1711_Ome_1009640_269149_ImageActual
+1711	sensitive	1	omentum	Metastatic	Ome	1711_Ome_1009639_269148_ImageActual
+2	refractory	0	Omentum	Metastatic	Ome	2_Ome_1009402_171069_ImageActual
+2	refractory	0	Omentum	Metastatic	Ome	2_Ome_1009403_171101_ImageActual
+2054	refractory	0	omentum	Metastatic	Ome	2054_Ome_1009650_269159_ImageActual
+2054	refractory	0	omentum	Metastatic	Ome	2054_Ome_1009651_269160_ImageActual
+22	sensitive	1	Omentum	Metastatic	Ome	22_Ome_1009422_171149_ImageActual
+25	sensitive	1	Omentum	Metastatic	Ome	25_Ome_1009531_171141_ImageActual
+25	sensitive	1	Omentum	Metastatic	Ome	25_Ome_1009530_171139_ImageActual
+2510	refractory	0	omentum	Metastatic	Ome	2510_Ome_1009654_269163_ImageActual
+2510	refractory	0	omentum	Metastatic	Ome	2510_Ome_1009655_269164_ImageActual
+26	sensitive	1	Omentum	Metastatic	Ome	26_Ome_1009426_171000_ImageActual
+26	sensitive	1	Omentum	Metastatic	Ome	26_Ome_1009427_171042_ImageActual
+2710	refractory	0	omentum	Metastatic	Ome	2710_Ome_1009681_269190_ImageActual
+2710	refractory	0	omentum	Metastatic	Ome	2710_Ome_1009680_269189_ImageActual
+31	sensitive	1	Omentum	Metastatic	Ome	31_Ome_1009435_171150_ImageActual
+31	sensitive	1	Omentum	Metastatic	Ome	31_Ome_1009434_171123_ImageActual
+3219	sensitive	1	omentum	Metastatic	Ome	3219_Ome_1009664_269173_ImageActual
+3219	sensitive	1	omentum	Metastatic	Ome	3219_Ome_1009665_269174_ImageActual
+33	refractory	0	Omentum	Metastatic	Ome	33_Ome_1009437_171013_ImageActual
+33	refractory	0	Omentum	Metastatic	Ome	33_Ome_1009436_171075_ImageActual
+34	sensitive	1	Omentum	Metastatic	Ome	34_Ome_1009438_171128_ImageActual
+34	sensitive	1	Omentum	Metastatic	Ome	34_Ome_1009439_171060_ImageActual
+3480	refractory	0	omentum	Metastatic	Ome	3480_Ome_1009683_269192_ImageActual
+3480	refractory	0	omentum	Metastatic	Ome	3480_Ome_1009682_269191_ImageActual
+36	sensitive	1	Omentum	Metastatic	Ome	36_Ome_1009539_171103_ImageActual
+36	sensitive	1	Omentum	Metastatic	Ome	36_Ome_1009538_171072_ImageActual
+3714	sensitive	1	Omental met	Metastatic	Ome	3714_Ome_1009643_269152_ImageActual
+3714	sensitive	1	Omental met	Metastatic	Ome	3714_Ome_1009588_269097_ImageActual
+38	sensitive	1	Omentum	Metastatic	Ome	38_Ome_1009445_416629_ImageActual
+38	sensitive	1	Omentum	Metastatic	Ome	38_Ome_1009444_171012_ImageActual
+4086	sensitive	1	omentum nodule	Metastatic	Ome	4086_Ome_1009621_269130_ImageActual
+4086	sensitive	1	omentum nodule	Metastatic	Ome	4086_Ome_1009622_269131_ImageActual
+4421	sensitive	1	omentum	Metastatic	Ome	4421_Ome_1009628_269137_ImageActual
+4421	sensitive	1	omentum	Metastatic	Ome	4421_Ome_1009627_269136_ImageActual
+4564	refractory	0	Metastasis within abdomen	Metastatic	Ome	4564_Ome_1009590_269099_ImageActual
+4564	refractory	0	Metastasis within abdomen	Metastatic	Ome	4564_Ome_1009589_269098_ImageActual
+4968	refractory	0	no co-path report, maybe omentum?	Metastatic	Ome	4968_Ome_1009657_269166_ImageActual
+4968	refractory	0	no co-path report, maybe omentum?	Metastatic	Ome	4968_Ome_1009656_269165_ImageActual
+5	sensitive	1	Omentum	Metastatic	Ome	5_Ome_1009488_171110_ImageActual
+5	sensitive	1	Omentum	Metastatic	Ome	5_Ome_1009489_171014_ImageActual
+5161	sensitive	1	omental biopsy	Metastatic	Ome	5161_Ome_1009662_269171_ImageActual
+5161	sensitive	1	omental biopsy	Metastatic	Ome	5161_Ome_1009663_269172_ImageActual
+53	sensitive	1	Omentum	Metastatic	Ome	53_Ome_1009459_171028_ImageActual
+53	sensitive	1	Omentum	Metastatic	Ome	53_Ome_1009458_171008_ImageActual
+5462	refractory	0	omentum	Metastatic	Ome	5462_Ome_1009685_269194_ImageActual
+5462	refractory	0	omentum	Metastatic	Ome	5462_Ome_1009684_269193_ImageActual
+65	refractory	0	Omentum	Metastatic	Ome	65_Ome_1009471_171011_ImageActual
+65	refractory	0	Omentum	Metastatic	Ome	65_Ome_1009470_171063_ImageActual
+7	refractory	0	Omentum	Metastatic	Ome	7_Ome_1009526_171146_ImageActual
+7	refractory	0	Omentum	Metastatic	Ome	7_Ome_1009527_171145_ImageActual
+70	refractory	0	Omentum	Metastatic	Ome	70_Ome_1009483_171055_ImageActual
+70	refractory	0	Omentum	Metastatic	Ome	70_Ome_1009482_171076_ImageActual
+7053	sensitive	1	omentum	Metastatic	Ome	7053_Ome_1009610_269119_ImageActual
+7053	sensitive	1	omentum	Metastatic	Ome	7053_Ome_1009609_269118_ImageActual
+72	sensitive	1	Omentum	Metastatic	Ome	72_Ome_1009476_171143_ImageActual
+72	sensitive	1	Omentum	Metastatic	Ome	72_Ome_1009477_416635_ImageActual
+7339	refractory	0	omentum	Metastatic	Ome	7339_Ome_1009606_269115_ImageActual
+7339	refractory	0	omentum	Metastatic	Ome	7339_Ome_1009605_269114_ImageActual
+7924	sensitive	1	omental cake	Metastatic	Ome	7924_Ome_1009661_269170_ImageActual
+7924	sensitive	1	omental cake	Metastatic	Ome	7924_Ome_1009660_269169_ImageActual
+8	refractory	0	Omentum	Metastatic	Ome	8_Ome_1009495_416638_ImageActual
+8	refractory	0	Omentum	Metastatic	Ome	8_Ome_1009494_171056_ImageActual
+80	sensitive	1	Omentum	Metastatic	Ome	80_Ome_1009475_171118_ImageActual
+80	sensitive	1	Omentum	Metastatic	Ome	80_Ome_1009474_171099_ImageActual
+8005	refractory	0	traverse colon with omentum	Metastatic	Ome	8005_Ome_1009677_269186_ImageActual
+8318	sensitive	1	omentum	Metastatic	Ome	8318_Ome_1009659_269168_ImageActual
+8318	sensitive	1	omentum	Metastatic	Ome	8318_Ome_1009658_269167_ImageActual
+84	sensitive	1	Omentum	Metastatic	Ome	84_Ome_1009508_171116_ImageActual
+84	sensitive	1	Omentum	Metastatic	Ome	84_Ome_1009509_416643_ImageActual
+86	refractory	0	Omentum	Metastatic	Ome	86_Ome_1009510_171098_ImageActual
+86	refractory	0	Omentum	Metastatic	Ome	86_Ome_1009511_416644_ImageActual
+8985	refractory	0	omentum	Metastatic	Ome	8985_Ome_1009592_269101_ImageActual
+8985	refractory	0	omentum	Metastatic	Ome	8985_Ome_1009591_269100_ImageActual
+95	sensitive	1	Omentum	Metastatic	Ome	95_Ome_1009522_171124_ImageActual
+95	sensitive	1	Omentum	Metastatic	Ome	95_Ome_1009523_416648_ImageActual
+96	refractory	0	Omentum	Metastatic	Ome	96_Ome_1009408_171100_ImageActual
+96	refractory	0	Omentum	Metastatic	Ome	96_Ome_1009409_171002_ImageActual
+99	refractory	0	Omentum	Metastatic	Ome	99_Ome_1009542_171106_ImageActual
+99	refractory	0	Omentum	Metastatic	Ome	99_Ome_1009543_171082_ImageActual
+CU-03	Refractory	0	Omentum	Metastatic	Ome	CU-03_Ome_1009806_271260_ImageActual
+CU-03	Refractory	0	Omentum	Metastatic	Ome	CU-03_Ome_1009808_271277_ImageActual
+CU-05	Refractory	0	Omentum	Metastatic	Ome	CU-05_Ome_1009813_271313_ImageActual
+CU-05	Refractory	0	Omentum	Metastatic	Ome	CU-05_Ome_1009810_271267_ImageActual
+CU-07	Refractory	0	Omentum	Metastatic	Ome	CU-07_Ome_1009797_271258_ImageActual
+CU-07	Refractory	0	Omentum	Metastatic	Ome	CU-07_Ome_1009796_271247_ImageActual
+CU-10	Refractory	0	Omentum	Metastatic	Ome	CU-10_Ome_1009786_271252_ImageActual
+CU-10	Refractory	0	Omentum	Metastatic	Ome	CU-10_Ome_1009788_271278_ImageActual
+CU-13	Refractory	0	Omentum	Metastatic	Ome	CU-13_Ome_1009774_271246_ImageActual
+CU-13	Refractory	0	Omentum	Metastatic	Ome	CU-13_Ome_1009802_271273_ImageActual
+CU-14	Refractory	0	Omentum	Metastatic	Ome	CU-14_Ome_1009803_271259_ImageActual
+CU-14	Refractory	0	Omentum	Metastatic	Ome	CU-14_Ome_1009775_271245_ImageActual
+CU-15	Refractory	0	Omentum	Metastatic	Ome	CU-15_Ome_1009865_271321_ImageActual
+CU-15	Refractory	0	Omentum	Metastatic	Ome	CU-15_Ome_1009776_271238_ImageActual
+CU-17	Refractory	0	Omentum	Metastatic	Ome	CU-17_Ome_1009778_271234_ImageActual
+CU-17	Refractory	0	Omentum	Metastatic	Ome	CU-17_Ome_1009857_271323_ImageActual
+CU-18	Refractory	0	Omentum	Metastatic	Ome	CU-18_Ome_1009858_271310_ImageActual
+CU-18	Refractory	0	Omentum	Metastatic	Ome	CU-18_Ome_1009779_271250_ImageActual
+CU-27	Sensitive	1	Omentum	Metastatic	Ome	CU-27_Ome_1009828_271292_ImageActual
+CU-27	Sensitive	1	Omentum	Metastatic	Ome	CU-27_Ome_1009848_271317_ImageActual
+CU-29	Sensitive	1	Omentum	Metastatic	Ome	CU-29_Ome_1009850_271305_ImageActual
+CU-29	Sensitive	1	Omentum	Metastatic	Ome	CU-29_Ome_1009830_271301_ImageActual
+CU-34	Sensitive	1	Omentum	Metastatic	Ome	CU-34_Ome_1009855_271325_ImageActual
+CU-34	Sensitive	1	Omentum	Metastatic	Ome	CU-34_Ome_1009835_271288_ImageActual
+CU-40	Sensitive	1	Omentum	Metastatic	Ome	CU-40_Ome_1009841_271316_ImageActual
+CU-40	Sensitive	1	Omentum	Metastatic	Ome	CU-40_Ome_1009821_271266_ImageActual
+CU-42	Sensitive	1	Omentum	Metastatic	Ome	CU-42_Ome_1009823_271262_ImageActual
+CU-42	Sensitive	1	Omentum	Metastatic	Ome	CU-42_Ome_1009843_271303_ImageActual
+CU-44	Sensitive	1	Omentum	Metastatic	Ome	CU-44_Ome_1009845_271294_ImageActual
+CU-44	Sensitive	1	Omentum	Metastatic	Ome	CU-44_Ome_1009825_271290_ImageActual

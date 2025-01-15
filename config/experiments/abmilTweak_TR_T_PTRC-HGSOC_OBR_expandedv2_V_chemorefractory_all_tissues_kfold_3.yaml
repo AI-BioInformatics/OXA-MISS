@@ -1,0 +1,70 @@
+title: abmil_Treatment_Response_T_PTRC-HGSOC_OBR_expandedv2_V_chemorefractory_kfold_3_all_tissues
+project_dir: '/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/results'
+seed: 42
+
+wandb:
+  mode: online
+
+data_loader:
+  datasets_configs: ["/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/config/datasets/TR_PTRC-HGSOC_all_tissues.yaml","/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/config/datasets/Decider_dataset_TR_chemorefractory_all_tissues.yaml","/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/config/datasets/TR_OBR_expandedv2_all_tissues.yaml"]
+  task_type: "Treatment_Response"
+  max_patches: 4096
+  batch_size: 1
+  real_batch_size: 8
+  n_bins: 4
+  sample: True
+  test_sample: False
+  load_slides_in_RAM: True
+  label_name: "Treatment_Response"
+  censorships_name: "None"
+  eps: 0.000001
+  num_workers: 8
+  train_size: 0.7
+  val_size: 0.15
+  test_size: 0.15
+  random_state: 42
+  preprocessing: /work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/config/preprocessing.yaml
+  augmentation: /work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/config/augmentation.yaml
+  KFold:
+    splits: ["/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/splits/Treatment_Response/T_PTRC-HGSOC_OBR_expandedv2_V_chemorefractory/k_3/all_tissues/fold_0.csv"]
+    internal_val_size: 0.0
+
+model:
+  name: ABMIL_Tweak
+  pretrained: False # False # True
+  kwargs:
+    input_dim: 1024
+    inner_dim: 64
+    output_dim: 2
+  device: cuda
+
+loss:
+  name: CrossEntropyLoss
+  kwargs:
+    label_smoothing: 0.0
+    reduction: 'mean'
+    weight: [1, 1]
+
+scheduler:
+  batch_step: False
+  name: MultiStepLR
+  milestones: [1000]
+  gamma: 0.2
+  pct_start: 0.1
+  steps_per_epoch: 1
+
+optimizer:
+  learning_rate: 0.001
+  name: RAdam
+  weight_decay: 0.0001 # 0 # 0.00005
+  momentum: None
+
+trainer:
+  reload: False
+  checkpoint: ''
+  do_train: False
+  do_test: False
+  do_inference: False
+  do_kfold: True
+  epochs: 10
+  patience: 7

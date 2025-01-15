@@ -1,0 +1,10 @@
+name: PTRC-HGSOC
+parameters:
+  dataframe_path: "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/dataloader/dataset/PTRC-HGSOC_all_tissues_labels.csv"
+  pt_files_path: "/work/H2020DeciderFicarra/D2_4/datasets/PTRC-HGSOC/features_UNI/pt_files"
+  tissue_type_filter: ["Ome", "Ova", "Per", "Tub", "Oth", "Adn", "Mes", "Ute", "Vag", "LNR", "Bow", "And"]
+  task_type: "Treatment_Response"
+  label_name: "Treatment_Response"
+  censorships_name: "None"
+  case_id_name: "slide_id"
+  slide_id_name: "slide_id"

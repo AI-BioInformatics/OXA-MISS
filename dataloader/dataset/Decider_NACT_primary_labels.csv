@@ -1,0 +1,177 @@
+case_id	slide_id	Treatment_Response_True_Label	Treatment_Response	FUT	Survival_True_Label	Survival	PFI	PFS
+D331	D331_pOme1_DE_HE	Complete Response	1	1140.0	Alive	1	995.0	1140.0
+D331	D331_pOme2_JL_PL_HE	Complete Response	1	1140.0	Alive	1	995.0	1140.0
+D331	D331_pOme1_DE_rct	Complete Response	1	1140.0	Alive	1	995.0	1140.0
+D335	D335_pOme1_JL_PL_HE	Complete Response	1	807.0	Dead	0	209.0	357.0
+D335	D335_pOme1_DE_HE	Complete Response	1	807.0	Dead	0	209.0	357.0
+D336	D336_oOme_PE_ _HE	Complete Response	1	1118.0	Alive	1	912.0	1091.0
+D341	D341_pOme1_DE_HE	Partial Response	1	576.0	Dead	0	238.0	392.0
+D341	D341_pOme_PE_II_HE	Partial Response	1	576.0	Dead	0	238.0	392.0
+D343	D343_pOme1_DE_HE	ND	0	170.0	Dead	0	15.0	149.0
+D351	D351_p2Ome2_PE_B_HE	Complete Response	1	979.0	Alive	1	761.0	979.0
+D351	D351_p2Ome2_PE_C_HE	Complete Response	1	979.0	Alive	1	761.0	979.0
+D351	D351_pOme1_DE_HE	Complete Response	1	979.0	Alive	1	761.0	979.0
+D351	D351_p2Ome2_PE_A_HE	Complete Response	1	979.0	Alive	1	761.0	979.0
+D351	D351_p2Ome1_DE_HE	Complete Response	1	979.0	Alive	1	761.0	979.0
+D351	D351_pOme3_JL_BFO_HE	Complete Response	1	979.0	Alive	1	761.0	979.0
+D351	D351_pOme3_JL_APL_HE	Complete Response	1	979.0	Alive	1	761.0	979.0
+D351	D351_p2Ome2_PE_D_HE	Complete Response	1	979.0	Alive	1	761.0	979.0
+D351	D351_pOme2_PE_ _HE	Complete Response	1	979.0	Alive	1	761.0	979.0
+D353	D353_pOme2_JL_BFO_HE	Partial Response	1	957.0	Alive	1	160.0	351.0
+D353	D353_pOme1_DE_HE	Partial Response	1	957.0	Alive	1	160.0	351.0
+D353	D353_pOme2_JL_APL_HE	Partial Response	1	957.0	Alive	1	160.0	351.0
+D354	D354_pOme_JL_BFO_HE	Partial Response	1	251.0	Dead	0	139.0	251.0
+D354	D354_pOme1_DE_HE	Partial Response	1	251.0	Dead	0	139.0	251.0
+D354	D354_pOme_JL_APL_HE	Partial Response	1	251.0	Dead	0	139.0	251.0
+D362	D362_pOme2_JL__HE	Partial Response	1	343.0	Dead	0	150.0	331.0
+D362	D362_pOme3_PE_I_HE	Partial Response	1	343.0	Dead	0	150.0	331.0
+D362	D362_pOme1_DE_HE	Partial Response	1	343.0	Dead	0	150.0	331.0
+D370	D370_p0Ome_PE__HE	Stable Disease	0	811.0	Alive	1	20.0	186.0
+D375	D375_pOme1_DE_HE	Partial Response	1	812.0	Alive	1	454.0	693.0
+D378	D378_pOme1_DE_HE	Partial Response	1	773.0	Alive	1	584.0	773.0
+D404	D404_pOme1_DE_HE	Partial Response	1	566.0	Alive	1	342.0	566.0
+D408	D408_pOme1_DE_HE	Partial Response	1	489.0	Alive	1	294.0	489.0
+D411	D411_pOme2_JL_B_HE	Progressive Disease	0	233.0	Dead	0	22.0	140.0
+D411	D411_pOme2_JL_A_HE	Progressive Disease	0	233.0	Dead	0	22.0	140.0
+D411	D411_pOme1_DE_HE	Progressive Disease	0	233.0	Dead	0	22.0	140.0
+D411	D411_p2Ome_PE_IA_HE	Progressive Disease	0	233.0	Dead	0	22.0	140.0
+D411	D411_p2Ome_PE_IC_HE	Progressive Disease	0	233.0	Dead	0	22.0	140.0
+D411	D411_p2Ome_PE_IB_HE	Progressive Disease	0	233.0	Dead	0	22.0	140.0
+D417	D417_pOme1_SCB_DE_HE	Partial Response	1	461.0	Alive	1	124.0	307.0
+D417	D417_pOme1_DE_HE	Partial Response	1	461.0	Alive	1	124.0	307.0
+D427	D427_pOme1_DE_HE	Complete Response	1	399.0	Alive	1	251.0	399.0
+D430	D430_pOme1_DE_HE	Stable Disease	0	370.0	Alive	1	38.0	147.0
+D436	D436_pOme1_DE_HE	Complete Response	1	337.0	Alive	1	145.0	337.0
+D445	D445_pOme1_DE_HE	Partial Response	1	305.0	Alive	1	136.0	305.0
+D448	D448_p2Ome1_DE_HE	Complete Response	1	293.0	Alive	1	112.0	293.0
+H011	H011_pOme_PE_I_HE	Partial Response	1	657.0	Dead	0	183.0	365.0
+H040	H040_pOme_PE_A_HE_2021-12-17_13-36-46	Complete Response	1	3001.0	Alive	1	585.0	740.0
+H040	H040_pOme_PE_B_HE_2021-12-17_13-43-28	Complete Response	1	3001.0	Alive	1	585.0	740.0
+H046	H046_pOme _PE_II_HE	Complete Response	1	1373.0	Dead	0	826.0	986.0
+H082	H082_pOme_JL__A_HE	ND	0	180.0	Dead	0	25.0	125.0
+H082	H082_pOme_JL__B_HE	ND	0	180.0	Dead	0	25.0	125.0
+H082	H082_pOme_JL__C_HE	ND	0	180.0	Dead	0	25.0	125.0
+H083	H083_pOme_JL_C_HE	Complete Response	1	1494.0	Dead	0	797.0	965.0
+H083	H083_pOme_JL_A_HE	Complete Response	1	1494.0	Dead	0	797.0	965.0
+H083	H083_pOme_JL_B_HE	Complete Response	1	1494.0	Dead	0	797.0	965.0
+H085	H085_pOme_PE_II_HE	Progressive Disease	0	47.0	Dead	0	13.0	40.0
+H089	H089_pOme_PE_APL_HE	Complete Response	1	923.0	Dead	0	280.0	453.0
+H089	H089_pOme_PE_BFO_HE	Complete Response	1	923.0	Dead	0	280.0	453.0
+H089	H089_pOme_PE_BFO_HE_rscn	Complete Response	1	923.0	Dead	0	280.0	453.0
+H094	H094_pOme_PE_IV_HE	Complete Response	1	2623.0	Alive	1	210.0	355.0
+H096	H096_pOme_PE_I_HE	ND	0	440.0	Dead	0	25.0	68.0
+H103	H103_pOme_PE_I_HE	Complete Response	1	931.0	Dead	0	208.0	424.0
+H106	H106_pOme_PE_A_HE	Progressive Disease	0	402.0	Dead	0	2.0	223.0
+H106	H106_pOme_PE_B_HE	Progressive Disease	0	402.0	Dead	0	2.0	223.0
+H112	H112_pOme_PE_II_HE	Partial Response	1	1686.0	Dead	0	460.0	701.0
+H114	H114_pOme_PE_ _HE	Complete Response	1	860.0	Dead	0	706.0	860.0
+H116	H116_pOme_PE_ _HE	Partial Response	1	891.0	Dead	0	177.0	331.0
+H116	H116_pOme_PE_ _HE_rscn	Partial Response	1	891.0	Dead	0	177.0	331.0
+H122	H122_pOme_PE__HE	Complete Response	1	537.0	Dead	0	107.0	308.0
+H122	H122_pOme_PE_PL_HE	Complete Response	1	537.0	Dead	0	107.0	308.0
+H128	H128_pOme_PE_IPL_HE	Complete Response	1	987.0	Dead	0	126.0	300.0
+H128	H128_pOme_JL_IPL_HE	Complete Response	1	987.0	Dead	0	126.0	300.0
+H128	H128_pOme_PE_I_HE	Complete Response	1	987.0	Dead	0	126.0	300.0
+H142	H142_pOme_PE_ _HE_rct-rscn	Progressive Disease	0	548.0	Dead	0	14.0	236.0
+H142	H142_pOme_PE_ _HE	Progressive Disease	0	548.0	Dead	0	14.0	236.0
+H143	H143_pOme_JL_BFO_HE_rct-rscn	Complete Response	1	1040.0	Dead	0	92.0	271.0
+H143	H143_pOme_PE_APL_HE	Complete Response	1	1040.0	Dead	0	92.0	271.0
+H143	H143_pOme_JL_APL_HE_rct-rscn	Complete Response	1	1040.0	Dead	0	92.0	271.0
+H144	H144_pOme1_xO_PE_HE	Stable Disease	0	268.0	Dead	0	30.0	78.0
+H144	H144_pOme_PE_II_HE	Stable Disease	0	268.0	Dead	0	30.0	78.0
+H144	H144_pOme1_xO_PE_HE_rct-rscn	Stable Disease	0	268.0	Dead	0	30.0	78.0
+H158	H158_pOme_PE_II_HE	Partial Response	1	827.0	Dead	0	120.0	329.0
+H160	H160_pOme_PE_I_HE	Partial Response	1	575.0	Dead	0	83.0	288.0
+H166	H166_pOme_PE_A_HE	Partial Response	1	1005.0	Dead	0	65.0	274.0
+H166	H166_pOme_PE_APL_HE	Partial Response	1	1005.0	Dead	0	65.0	274.0
+H166	H166_pOme_PE_BFO_HE	Partial Response	1	1005.0	Dead	0	65.0	274.0
+H166	H166_pOme_PE_B_HE	Partial Response	1	1005.0	Dead	0	65.0	274.0
+H173	H173_pOme_PE_II_HE	Complete Response	1	1227.0	Dead	0	393.0	534.0
+H173	H173_pOme_PE_II_HE_2	Complete Response	1	1227.0	Dead	0	393.0	534.0
+H182	H182_pOme2_cO_PE_HE	Complete Response	1	2183.0	Alive	1	292.0	473.0
+H182	H182_pOme1_cO_PE_HE	Complete Response	1	2183.0	Alive	1	292.0	473.0
+H182	H182_pOme2_cO_PE_HE_rct-rscn	Complete Response	1	2183.0	Alive	1	292.0	473.0
+H194	H194_pOme_PE_A_HE	Partial Response	1	590.0	Dead	0	145.0	397.0
+H194	H194_pOme_JL_BFO_HE_rct-rscn	Partial Response	1	590.0	Dead	0	145.0	397.0
+H194	H194_pOme_JL_APL_HE_rct-rscn	Partial Response	1	590.0	Dead	0	145.0	397.0
+H194	H194_pOme_PE_B_HE	Partial Response	1	590.0	Dead	0	145.0	397.0
+H194	H194_pOme_PE_ _HE	Partial Response	1	590.0	Dead	0	145.0	397.0
+H201	H201_pOme_PE_II_HE	Complete Response	1	1065.0	Dead	0	291.0	470.0
+H201	H201_pOme_PE_II_HE_rscn	Complete Response	1	1065.0	Dead	0	291.0	470.0
+H215	H215_pOme_JL_PL_HE_rscn	Partial Response	1	676.0	Dead	0	230.0	377.0
+H215	H215_pOme_JL_PL_HE	Partial Response	1	676.0	Dead	0	230.0	377.0
+H228	H228_pOme1_x_PE__HE_rct-rscn	Complete Response	1	1378.0	Dead	0	329.0	537.0
+H228	H228_pOme_PE__HE	Complete Response	1	1378.0	Dead	0	329.0	537.0
+H228	H228_pOme2_cO_PE_HE_rct-rscn	Complete Response	1	1378.0	Dead	0	329.0	537.0
+H228	H228_pOme2_cO_PE_HE	Complete Response	1	1378.0	Dead	0	329.0	537.0
+H228	H228_pOme1_x_PE_HE	Complete Response	1	1378.0	Dead	0	329.0	537.0
+H231	H231_pOme_PE_A_HE	Progressive Disease	0	810.0	Dead	0	25.0	179.0
+H231	H231_pOme_PE_B_HE	Progressive Disease	0	810.0	Dead	0	25.0	179.0
+H235	H235_pOme_JL_BFO_HE	Partial Response	1	664.0	Dead	0	130.0	284.0
+H235	H235_pOme_PE_I_HE	Partial Response	1	664.0	Dead	0	130.0	284.0
+H235	H235_pOme_PE_I_HE_rscn	Partial Response	1	664.0	Dead	0	130.0	284.0
+H235	H235_pOme_JL_APL_HE	Partial Response	1	664.0	Dead	0	130.0	284.0
+H243	H243_pOme_PE_IIE_HE	Partial Response	1	1799.0	Alive	1	685.0	838.0
+H243	H243_pOme_PE_IIB_HE	Partial Response	1	1799.0	Alive	1	685.0	838.0
+H243	H243_pOme_PE_IIA_HE	Partial Response	1	1799.0	Alive	1	685.0	838.0
+H243	H243_pOme_PE_IIC_HE	Partial Response	1	1799.0	Alive	1	685.0	838.0
+H243	H243_pOme_PE_IID_HE	Partial Response	1	1799.0	Alive	1	685.0	838.0
+H249	H249_pOme_PE_ _HE	Partial Response	1	711.0	Dead	0	498.0	671.0
+H258	H258_pOme_PE_II_HE	Complete Response	1	995.0	Dead	0	133.0	315.0
+H281	H281_pOme_PE_II_HE	Complete Response	1	984.0	Dead	0	307.0	475.0
+H292	H292_pOme_PE_IIA_HE	Stable Disease	0	911.0	Dead	0	42.0	93.0
+H292	H292_pOme_PE_IIB_HE	Stable Disease	0	911.0	Dead	0	42.0	93.0
+H299	H299_pOme_JL_APL_HE	Complete Response	1	519.0	Dead	0	344.0	519.0
+H299	H299_pOme_JL_BFO_HE	Complete Response	1	519.0	Dead	0	344.0	519.0
+H307	H307_pOme2_PE_I_HE	Progressive Disease	0	412.0	Dead	0	24.0	147.0
+H307	H307_pOme1_JL_B_HE	Progressive Disease	0	412.0	Dead	0	24.0	147.0
+H307	H307_pOme1_JL_A_HE	Progressive Disease	0	412.0	Dead	0	24.0	147.0
+H314	H314_pOme_PE_IIA_HE	Stable Disease	0	718.0	Dead	0	7.0	63.0
+H314	H314_pOme_PE_IIB_HE	Stable Disease	0	718.0	Dead	0	7.0	63.0
+H314	H314_pOme_JL_ICFO_HE	Stable Disease	0	718.0	Dead	0	7.0	63.0
+H314	H314_pOme_JL_IBFO_HE	Stable Disease	0	718.0	Dead	0	7.0	63.0
+H314	H314_pOme_JL_IAPL_HE	Stable Disease	0	718.0	Dead	0	7.0	63.0
+H314	H314_pOme_JL_IIFO_HE	Stable Disease	0	718.0	Dead	0	7.0	63.0
+H314	H314_pOme_PE_IIC_HE	Stable Disease	0	718.0	Dead	0	7.0	63.0
+H323	H323_pOme2_PE_IIIB_HE	Complete Response	1	990.0	Dead	0	119.0	280.0
+H323	H323_pOme1_JL_B_HE	Complete Response	1	990.0	Dead	0	119.0	280.0
+H323	H323_pOme2_PE_IIIA_HE	Complete Response	1	990.0	Dead	0	119.0	280.0
+H323	H323_pOme1_JL_A_HE	Complete Response	1	990.0	Dead	0	119.0	280.0
+H325	H325_pOme_JL_C_HE	Partial Response	1	579.0	Dead	0	117.0	287.0
+H325	H325_pOme_JL_D_HE	Partial Response	1	579.0	Dead	0	117.0	287.0
+H325	H325_pOme_JL_B_HE	Partial Response	1	579.0	Dead	0	117.0	287.0
+H325	H325_pOme_JL_A_HE	Partial Response	1	579.0	Dead	0	117.0	287.0
+M004	M004_pOme_PE_VII_HE	Partial Response	1	661.0	Dead	0	106.0	316.0
+M004	M004_pOme_PE_VII_HE_rct-rscn	Partial Response	1	661.0	Dead	0	106.0	316.0
+M012	M012_pOme_PE_VIII_HE	Partial Response	1	859.0	Dead	0	273.0	490.0
+M014	M014_pOme_PE_IV_HE	Partial Response	1	1360.0	Dead	0	212.0	525.0
+M018	M018_pOme_PE_IC_HE	Partial Response	1	591.0	Dead	0	100.0	322.0
+M018	M018_pOme_PE_IB_HE	Partial Response	1	591.0	Dead	0	100.0	322.0
+M018	M018_pOme_PE_IA_HE	Partial Response	1	591.0	Dead	0	100.0	322.0
+M030	M030_pOme_PE_IV_HE	Complete Response	1	1868.0	Dead	0	1732.0	1868.0
+M032	M032_pOme_PE_III_HE	Partial Response	1	1008.0	Dead	0	275.0	475.0
+M033	M033_pOme_PE_I_HE	Progressive Disease	0	583.0	Dead	0	-8.0	333.0
+M039	M039_pOme_PE_IV_HE	Progressive Disease	0	171.0	Dead	0	27.0	73.0
+M040	M040_pOme_PE_II_HE	Partial Response	1	2111.0	Dead	0	375.0	599.0
+M045	M045_pOme_PE_IVB_HE	Complete Response	1	1114.0	Dead	0	92.0	334.0
+M045	M045_pOme2_PE_VII_HE	Complete Response	1	1114.0	Dead	0	92.0	334.0
+M045	M045_pOme_PE_IVB_HE_rct-rscn	Complete Response	1	1114.0	Dead	0	92.0	334.0
+M045	M045_pOme1_PE_IVA_HE	Complete Response	1	1114.0	Dead	0	92.0	334.0
+M049	M049_pOme_PE_V_HE	Complete Response	1	1361.0	Dead	0	360.0	569.0
+M056	M056_pOme_PE_II_HE	Complete Response	1	2115.0	Dead	0	283.0	421.0
+M058	M058_pOme_PE_A_HE	Progressive Disease	0	414.0	Dead	0	0.0	209.0
+M058	M058_pOme_PE_A_HE_rscn	Progressive Disease	0	414.0	Dead	0	0.0	209.0
+M058	M058_pOme_PE_B_HE	Progressive Disease	0	414.0	Dead	0	0.0	209.0
+M058	M058_pOme_PE_B_HE_rct-rscn	Progressive Disease	0	414.0	Dead	0	0.0	209.0
+M058	M058_pOme_PE_A_HE_rct-rscn	Progressive Disease	0	414.0	Dead	0	0.0	209.0
+M059	M059_pOme_PE_II_HE	Complete Response	1	4330.0	Alive	1	4178.0	4330.0
+M071	M071_pOme_PE_IA_HE	Progressive Disease	0	816.0	Dead	0	35.0	91.0
+M071	M071_pOme_PE_IB_HE	Progressive Disease	0	816.0	Dead	0	35.0	91.0
+M071	M071_pOme_PE_ID_HE	Progressive Disease	0	816.0	Dead	0	35.0	91.0
+M071	M071_pOme_PE_IC_HE	Progressive Disease	0	816.0	Dead	0	35.0	91.0
+M071	M071_pOme_PE_IE_HE	Progressive Disease	0	816.0	Dead	0	35.0	91.0
+OC002	OC002_pOme_PE_IB_HE	Complete Response	1	359.0	Dead	0	135.0	303.0
+OC002	OC002_pOme_PE_IA_HE_rct-rscn	Complete Response	1	359.0	Dead	0	135.0	303.0
+OC002	OC002_pOme_PE_IA_HE	Complete Response	1	359.0	Dead	0	135.0	303.0
+OC002	OC002_pOme_PE_IB_HE_rscn	Complete Response	1	359.0	Dead	0	135.0	303.0
+OC024	OC024_rOme_PE_I_HE	Complete Response	1	354.0	Dead	0	154.0	354.0
