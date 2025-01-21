@@ -77,6 +77,9 @@ class ModelManager():
         if self.config.model.name == "Custom":
             model = Custom(**self.config.model.kwargs)
             return model
+        if self.config.model.name == "Custom_Multimodal":
+            model = Custom_Multimodal(**self.config.model.kwargs)
+            return model
         if self.config.model.name == "TransMIL":
             model = TransMIL(**self.config.model.kwargs)
             return model
@@ -615,13 +618,13 @@ class ModelManager():
             if task_type == "Treatment_Response":
                 test_confusion_matrix = accuracy_confusionMatrix_plot(log_dict, test_metrics_df)
 
-    def log_aggregated(result_id):
-        out = kfold_results_merge(result_id)
+    def log_aggregated(self, result_id_path):
+        out = kfold_results_merge(result_id_path)
         to_log = {
-         "Last_Epoch_Model/Test/Aggregated/AUC": auc,
-         "Last_Epoch_Model/Test/Aggregated/Accuracy": accuracy,
-         "Last_Epoch_Model/Test/Aggregated/F1-Score": f1,
-         "Last_Epoch_Model/Test/Aggregated/Confusion_Matrix": wandb.Image(image),
+         "Last_Epoch_Model/Test/Aggregated/AUC": out['AUC'],
+         "Last_Epoch_Model/Test/Aggregated/Accuracy": out['Accuracy'],
+         "Last_Epoch_Model/Test/Aggregated/F1-Score": out['F1-Score'],
+         "Last_Epoch_Model/Test/Aggregated/Confusion_Matrix": wandb.Image(out['Confusion_Matrix']),
          }
-     wandb.log(to_log)
+        wandb.log(to_log)
 

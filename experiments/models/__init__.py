@@ -4,6 +4,7 @@ from .abmil import ABMIL
 from .MaxPooling import MaxPooling
 from .abmil_tweak import ABMIL_Tweak
 from .custom import Custom
+from .custom_multimodal import Custom_Multimodal
 from .transmil_mod import TransMIL
 from .model_DeepMISL import MIL_Attention_FC_surv
 from .LinearProbe import LinearProbe

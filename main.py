@@ -19,7 +19,7 @@ from munch import munchify, unmunchify
 import wandb
 from torch.utils.data import Dataset, DataLoader, Subset, SequentialSampler, SubsetRandomSampler
 from experiments.model_manager import ModelManager
-from dataloader.dataloader_multidataset import WSI_Dataset
+from dataloader.dataloader_multidataset_dev import Multimodal_Bio_Dataset
 from dataloader.dataloader_utils import get_dataloaders
 import gc
 os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
@@ -166,7 +166,7 @@ if __name__ == "__main__":
     # MOST OF THE FOLLOWING INSTRUCTIONS MUST BE WRAPPED IN A DATALOADER CLASS
     
     # CREATE DATALOADERS
-    dataset = WSI_Dataset(    
+    dataset = Multimodal_Bio_Dataset(    
                             datasets_configs=config.data_loader.datasets_configs, 
                             task_type=config.data_loader.task_type,                           
                             max_patches=config.data_loader.max_patches,
@@ -182,6 +182,8 @@ if __name__ == "__main__":
                                                                                     test_size=config.data_loader.test_size, 
                                                                                     random_state=config.data_loader.random_state
                                                                                 )
+    dataset.normalize_genomics(train_patients, val_patients, test_patients)
+    dataset.normalize_cnv(train_patients, val_patients, test_patients)
     train_dataloader, val_dataloader, test_dataloader = get_dataloaders(            
                                                                         dataset=dataset,
                                                                         train_patients=train_patients, 
@@ -246,12 +248,12 @@ if __name__ == "__main__":
         if type(config.data_loader.KFold.splits) is str:
             path_files = config.data_loader.KFold.splits
             lista_voci = os.listdir(path_files)
-            splits = [f for f in lista_voci if os.path.isfile(os.path.join(path_files, f))]
+            splits = [os.path.join(path_files,f) for f in lista_voci if os.path.isfile(os.path.join(path_files, f))]
         else:
             splits = config.data_loader.KFold.splits
 
-
-        for i, split_path in enumerate(splits):
+        
+        for i, split_path in enumerate(splits):            
             del mm
             torch.cuda.empty_cache()
             # Setup to be deterministic
@@ -270,7 +272,8 @@ if __name__ == "__main__":
                 val_patients = None
                 len_val = 0
             test_patients = split_df["val"].dropna().values.astype(str)
-
+            dataset.normalize_genomics(train_patients, val_patients, test_patients)
+            dataset.normalize_cnv(train_patients, val_patients, test_patients)
             train_dataloader, val_dataloader, test_dataloader = get_dataloaders(    
                                                                                     dataset=dataset,
                                                                                     train_patients=train_patients, 
@@ -310,7 +313,8 @@ if __name__ == "__main__":
                         device=config.model.device, 
                         path=f"{parent_directory}", 
                         kfold=foldname)
-                
+            
+        mm.log_aggregated(parent_directory)
 
     end_time = time.time() 
     execution_time = end_time - start_time

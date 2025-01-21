@@ -8,15 +8,44 @@ from sklearn.metrics import roc_auc_score, confusion_matrix,f1_score
 from PIL import Image
 import io
 #%%%%%%%%%%%%%%%%%%%%%
-path_1 = "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/results/custom_Treatment_Response_T_PTRC-HGSOC_chemorefractory_OBR_expandedv2_V_chemorefractory_kfold_3_all_tissues_YY2025-MM01-DD08-HH14-MM20_0910D0D7FE/last_epoch_test_df_Fold_1.h5"
-path_2 = "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/results/custom_Treatment_Response_T_PTRC-HGSOC_chemorefractory_OBR_expandedv2_V_chemorefractory_kfold_3_all_tissues_YY2025-MM01-DD08-HH14-MM20_0910D0D7FE/last_epoch_test_df_Fold_2.h5"
-path_3 = "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/results/custom_Treatment_Response_T_PTRC-HGSOC_chemorefractory_OBR_expandedv2_V_chemorefractory_kfold_3_all_tissues_YY2025-MM01-DD08-HH14-MM20_0910D0D7FE/last_epoch_test_df_Fold_3.h5"
+# path_1 = "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/results/custom_Treatment_Response_T_PTRC-HGSOC_chemorefractory_OBR_expandedv2_V_chemorefractory_kfold_3_all_tissues_YY2025-MM01-DD08-HH14-MM20_0910D0D7FE/last_epoch_test_df_Fold_1.h5"
+# path_2 = "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/results/custom_Treatment_Response_T_PTRC-HGSOC_chemorefractory_OBR_expandedv2_V_chemorefractory_kfold_3_all_tissues_YY2025-MM01-DD08-HH14-MM20_0910D0D7FE/last_epoch_test_df_Fold_2.h5"
+# path_3 = "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/results/custom_Treatment_Response_T_PTRC-HGSOC_chemorefractory_OBR_expandedv2_V_chemorefractory_kfold_3_all_tissues_YY2025-MM01-DD08-HH14-MM20_0910D0D7FE/last_epoch_test_df_Fold_3.h5"
+# paths = [path_1, path_2, path_3]
 
-df_1 = pd.read_hdf(path_1).set_index('patient_ids')
-df_2 = pd.read_hdf(path_2).set_index('patient_ids')
-df_3 = pd.read_hdf(path_3).set_index('patient_ids')
+# template = "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/results/custom_Treatment_Response_T_chemorefractory_V_chemorefractory_loo_all_tissues_YY2025-MM01-DD16-HH11-MM08_EFFDB88502/last_epoch_test_df_Fold_"
+# paths = [template+f"{i}.h5" for i in range(1, 79)]
+# template = "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/results/custom_Treatment_Response_T_chemorefractory_V_chemorefractory_loo_all_tissues_YY2025-MM01-DD16-HH11-MM08_2E899A0282/last_epoch_test_df_Fold_"
+# paths = [template+f"{i}.h5" for i in range(1, 76)]
+# template = "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/results/custom_Treatment_Response_T_chemorefractory_V_chemorefractory_loo_all_tissues_YY2025-MM01-DD16-HH11-MM08_0AAA4B1894/last_epoch_test_df_Fold_"
+# paths = [template+f"{i}.h5" for i in range(1, 78)]
+# template = "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/results/custom_Treatment_Response_T_PTRC-HGSOC_chemorefractory_OBR_expandedv2_V_chemorefractory_loo_all_tissues_YY2025-MM01-DD16-HH11-MM08_B01564EE98/last_epoch_test_df_Fold_"
+# paths = [template+f"{i}.h5" for i in range(1, 34)]
+
+# template = "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/results/custom_Treatment_Response_T_PTRC-HGSOC_chemorefractory_OBR_expandedv2_V_chemorefractory_loo_all_tissues_YY2025-MM01-DD16-HH11-MM08_B537E2C811/last_epoch_test_df_Fold_"
+# paths = [template+f"{i}.h5" for i in range(1, 34)]
+
+# template = "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/results/custom_Treatment_Response_T_PTRC-HGSOC_chemorefractory_OBR_expandedv2_V_chemorefractory_loo_all_tissues_YY2025-MM01-DD16-HH11-MM08_3A700F6999/last_epoch_test_df_Fold_"
+# paths = [template+f"{i}.h5" for i in range(1, 33)]
+
+
+
+template1 = "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/results/custom_Treatment_Response_T_PTRC-HGSOC_chemorefractory_OBR_expandedv2_V_chemorefractory_loo_all_tissues_YY2025-MM01-DD17-HH17-MM06_EB0781F329/last_epoch_test_df_Fold_"
+paths1 = [template1+f"{i}.h5" for i in range(1, 49)]
+
+template2 = "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/results/custom_Treatment_Response_T_PTRC-HGSOC_chemorefractory_OBR_expandedv2_V_chemorefractory_loo_all_tissues_YY2025-MM01-DD16-HH11-MM08_B01564EE98/last_epoch_test_df_Fold_"
+paths2 = [template2+f"{i}.h5" for i in range(1, 34)]
+
+paths = paths1 + paths2
+
+# df_1 = pd.read_hdf(path_1).set_index('patient_ids')
+# df_2 = pd.read_hdf(path_2).set_index('patient_ids')
+# df_3 = pd.read_hdf(path_3).set_index('patient_ids')
+
+dfs = [pd.read_hdf(path).set_index('patient_ids') for path in paths]
 #%%%%%%%%%%%%%%%%%%%%%
-df = pd.concat([df_1, df_2, df_3])
+# df = pd.concat([df_1, df_2, df_3])
+df = pd.concat(dfs)
 #%%%%%%%%%%%%%%%%%%%%%
 def accuracy_confusionMatrix_plot(log_dict, metrics_df):
     # Clear any existing plot

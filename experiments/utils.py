@@ -123,17 +123,21 @@ def accuracy_confusionMatrix_plot(log_dict, metrics_df):
     # Return the PIL Image object to be logged later
     return image
 
-def kfold_results_merge(result_id):
+def kfold_results_merge(result_id_path):
     prefisso = "last_epoch_test_df_Fold_"
     # cartella = f"/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/results/{result_id}"
-    cartella = result_id
+    cartella = result_id_path
     paths = [
-        f
+        os.path.join(result_id_path,f)
         for f in os.listdir(cartella)
         if os.path.isfile(os.path.join(cartella, f)) and f.startswith(prefisso)
     ]
 
     dfs = [pd.read_hdf(path).set_index('patient_ids') for path in paths]
+
+    is_loo_case = False
+    if len(dfs):
+        is_loo_case = len(dfs[0]['all_labels']) == 1
     
     df = pd.concat(dfs)
 
@@ -148,21 +152,18 @@ def kfold_results_merge(result_id):
     metrics_df = pd.DataFrame({"AUC": [auc], "F1-Score": [f1], "Accuracy": [accuracy]})
     
     log_dict = {"all_labels": all_labels, "treatment_response_predictions": all_predictions}
-    image = accuracy_confusionMatrix_plot(log_dict, metrics_df)
+    image =  accuracy_confusionMatrix_plot(log_dict, metrics_df)
     
-    # to_log = {
-    #     "Last_Epoch_Model/Test/Aggregated/AUC": auc,
-    #     "Last_Epoch_Model/Test/Aggregated/Accuracy": accuracy,
-    #     "Last_Epoch_Model/Test/Aggregated/F1-Score": f1,
-    #     "Last_Epoch_Model/Test/Aggregated/Confusion_Matrix": wandb.Image(image),
-    #     }
-    # wandb.log(to_log)
-    return {
+    out = {
         "AUC" : auc,
         "Accuracy" : accuracy,
-        "F1-Score" : f1,
-        "Confusion_Matrix" : image
+        "F1-Score" : f1
     }
+    
+    if is_loo_case:
+        return out
+    out["Confusion_Matrix"] = image
+    return out
 
 def predTime_vs_actualTime_confusionMatrix_plot(self, log_dict):
     patient_ids = log_dict["patient_ids"]
