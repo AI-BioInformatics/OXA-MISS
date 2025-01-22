@@ -21,7 +21,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import io
 from PIL import Image
-from .utils import accuracy_confusionMatrix_plot, kfold_results_merge
+from .utils import accuracy_confusionMatrix_plot, kfold_results_merge, move_to_device
 # from .metrics.loss_func import NLLSurvLoss
 # from .scheduler import *
 
@@ -261,12 +261,15 @@ class ModelManager():
                 metrics_dict[f"{dataset}_{key}"] = value
                         
         metrics_dict = {k: v.item() if isinstance(v, torch.Tensor) else v for k, v in metrics_dict.items()}
-        return metrics_dict       
+        return metrics_dict   
+
+   
 
     def step(self, batch, log_dict, task_type="Survival", device="cuda"):
         batch_data = batch['input']
         labels = batch['label'] #  check this casting        
-        batch_data = {key: value.to(device) if isinstance(value, torch.Tensor) else value for key, value in batch_data.items()} 
+        #batch_data = {key: value.to(device) if isinstance(value, torch.Tensor) else value for key, value in batch_data.items()} 
+        batch_data = move_to_device(batch_data, device)
         labels = labels.to(device)   
                  
         if len(labels.shape) == 1:

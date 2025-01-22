@@ -8,6 +8,7 @@ from torch.utils.data import Dataset, DataLoader, Subset, SequentialSampler, Sub
 from .dataloader_utils import extract_names
 import yaml
 from munch import munchify, unmunchify, Munch
+import json
 
 
 
@@ -53,29 +54,53 @@ class Multimodal_Bio_Dataset(Dataset):
             # load genomics data
             # if 'genomics_path' in config.parameters:
             
-            genomics = pd.read_csv(config.parameters.genomics_path, sep="\t").set_index("patient")
-            chatgpt = "/work/H2020DeciderFicarra/D2_4/datasets/DECIDER_cohorts/Gene_expression/Expression/chatgpt_gene_to_ensg_mapping.csv"
-            nature = "/work/H2020DeciderFicarra/D2_4/datasets/DECIDER_cohorts/Gene_expression/Expression/gene_to_ensg_mapping.csv"
-            selected_genes = pd.read_csv(chatgpt)
-            genomics = genomics[selected_genes["ensgID"].tolist()]
-            print("Genomics shape: ", genomics.shape)
-            genomics = np.log(genomics+0.1)
+            if hasattr(config.parameters, 'genomics_path'):
+                genomics = pd.read_csv(config.parameters.genomics_path, sep="\t").set_index("patient")
+                chatgpt = "/work/H2020DeciderFicarra/D2_4/datasets/DECIDER_cohorts/Gene_expression/Expression/chatgpt_gene_to_ensg_mapping.csv"
+                nature = "/work/H2020DeciderFicarra/D2_4/datasets/DECIDER_cohorts/Gene_expression/Expression/gene_to_ensg_mapping.csv"
+                daria1 = "/work/H2020DeciderFicarra/D2_4/datasets/DECIDER_cohorts/Gene_expression/Expression/daria1_gene_to_ensg_mapping.csv"
+                daria2 = "/work/H2020DeciderFicarra/D2_4/datasets/DECIDER_cohorts/Gene_expression/Expression/daria2_gene_to_ensg_mapping.csv"
+                daria_json_path = "/work/H2020DeciderFicarra/D2_4/datasets/DECIDER_cohorts/Gene_expression/Expression/daria_mapped.json"
+                with open(daria_json_path, 'r') as f:
+                    self.GE_selected_genes_groups = json.load(f)
+                self.GE_selected_gene_set = set()
+                for key in self.GE_selected_genes_groups:
+                    self.GE_selected_gene_set.update(self.GE_selected_genes_groups[key]["ensg_gene_id"])
+                self.GE_group_num = len(self.GE_selected_genes_groups)
 
-            cnv = pd.read_csv(config.parameters.cnv_path, sep="\t").set_index("patient")
-            chatgpt = "/work/H2020DeciderFicarra/D2_4/datasets/DECIDER_cohorts/Gene_expression/Expression/chatgpt_gene_to_ensg_mapping.csv"
-            nature = "/work/H2020DeciderFicarra/D2_4/datasets/DECIDER_cohorts/Gene_expression/Expression/gene_to_ensg_mapping.csv"
-            selected_genes = pd.read_csv(chatgpt)
-            cnv = cnv[selected_genes["ensgID"].tolist()]
-            print("CNV shape: ", cnv.shape)
+                genomics = genomics[list(self.GE_selected_gene_set)]
+                print("Genomics shape: ", genomics.shape)
+                genomics = np.log(genomics+0.1)
+
+            if hasattr(config.parameters, 'cnv_path'):
+                cnv = pd.read_csv(config.parameters.cnv_path, sep="\t").set_index("patient")
+                chatgpt = "/work/H2020DeciderFicarra/D2_4/datasets/DECIDER_cohorts/Gene_expression/Expression/chatgpt_gene_to_ensg_mapping.csv"
+                nature = "/work/H2020DeciderFicarra/D2_4/datasets/DECIDER_cohorts/Gene_expression/Expression/gene_to_ensg_mapping.csv"
+                daria1 = "/work/H2020DeciderFicarra/D2_4/datasets/DECIDER_cohorts/Gene_expression/Expression/daria1_gene_to_ensg_mapping.csv"
+                daria2 = "/work/H2020DeciderFicarra/D2_4/datasets/DECIDER_cohorts/Gene_expression/Expression/daria2_gene_to_ensg_mapping.csv"
+                # selected_genes = pd.read_csv(daria2)
+                daria_json_path = "/work/H2020DeciderFicarra/D2_4/datasets/DECIDER_cohorts/Gene_expression/Expression/daria_mapped.json"
+                with open(daria_json_path, 'r') as f:
+                    self.CNV_selected_genes_groups = json.load(f)
+                self.CNV_selected_gene_set = set()
+                for key in self.CNV_selected_genes_groups:
+                    self.CNV_selected_gene_set.update(self.CNV_selected_genes_groups[key]["ensg_gene_id"])
+                self.CNV_group_num = len(self.CNV_selected_genes_groups)
+                cnv = cnv[list(self.CNV_selected_gene_set)]
+                print("CNV shape: ", cnv.shape)
             
             if i==0:
                 self.dataframe = dataframe
-                self.genomics = genomics
-                self.cnv = cnv
+                if hasattr(config.parameters, 'genomics_path'):
+                    self.genomics = genomics
+                if hasattr(config.parameters, 'cnv_path'):
+                    self.cnv = cnv
             else:
                 self.dataframe = pd.concat([self.dataframe, dataframe], ignore_index=True)
-                self.genomics = pd.concat([self.genomics, genomics], ignore_index=True)
-                self.cnv = pd.concat([self.cnv, cnv], ignore_index=True)
+                if hasattr(config.parameters, 'genomics_path'):
+                    self.genomics = pd.concat([self.genomics, genomics], ignore_index=True)
+                if hasattr(config.parameters, 'cnv_path'):
+                    self.cnv = pd.concat([self.cnv, cnv], ignore_index=True)
                        
         #{'pAdnL', 'pOvaR', 'pMes1', 'pOth', 'pTubL', 'pPer', 'pAdnR', 'pTubL1', 'pOva', 'pTubR', 'p2Ome2', 'pPer2', 'pVag', 'pLNR', 'pUte1', 
         # 'pPerR1', 'pOvaL1', 'pOvaL', 'p2Oth', 'pPer ', 'pTub', 'pOme2', 'p0Ome', 'pUte2', 'pOva2', 'pMes', 'pOme ', 'pBow', 'pOme1', 'pOth2', 
@@ -93,7 +118,7 @@ class Multimodal_Bio_Dataset(Dataset):
         ############################
         # maybe wrap this into a function
         # self.patient_df = self.patient_df[self.patient_df.index.isin(self.genomics.index)]
-        self.patient_df = self.patient_df[self.patient_df.index.isin(self.cnv.join(self.genomics, rsuffix="zio_", how="inner").index)]
+        # self.patient_df = self.patient_df[self.patient_df.index.isin(self.cnv.join(self.genomics, rsuffix="zio_", how="inner").index)]
         self.patient_list = list(self.patient_df.index)
         ############################
         if self.task_type == "Survival":
@@ -132,27 +157,27 @@ class Multimodal_Bio_Dataset(Dataset):
         val_patients_idx = pd.Index(val_patients)
         test_patients_idx = pd.Index(test_patients)
 
-        # Normalize Genomics
-        self.normalized_genomics = deepcopy(self.genomics)
-        X_train = self.normalized_genomics.loc[train_patients_idx, :]
-        X_val = self.normalized_genomics.loc[val_patients_idx, :]
-        X_test = self.normalized_genomics.loc[test_patients_idx, :]
-        scaler = StandardScaler()
-        scaler.fit(X_train)  # fit on train set
-        # Transform entire subsets of the copied DataFrame
-        self.normalized_genomics.loc[train_patients_idx, :] = scaler.transform(X_train)
-        self.normalized_genomics.loc[val_patients_idx, :] = scaler.transform(X_val)
-        self.normalized_genomics.loc[test_patients_idx, :] = scaler.transform(X_test)
+        # # Normalize Genomics
+        # self.normalized_genomics = deepcopy(self.genomics)
+        # X_train = self.normalized_genomics.loc[train_patients_idx, :]
+        # X_val = self.normalized_genomics.loc[val_patients_idx, :]
+        # X_test = self.normalized_genomics.loc[test_patients_idx, :]
+        # scaler = StandardScaler()
+        # scaler.fit(X_train)  # fit on train set
+        # # Transform entire subsets of the copied DataFrame
+        # self.normalized_genomics.loc[train_patients_idx, :] = scaler.transform(X_train)
+        # self.normalized_genomics.loc[val_patients_idx, :] = scaler.transform(X_val)
+        # self.normalized_genomics.loc[test_patients_idx, :] = scaler.transform(X_test)
 
-        # Normalize CNV
-        self.normalized_cnv = deepcopy(self.cnv)
-        X_train = self.normalized_cnv.loc[train_patients_idx, :]
-        X_val = self.normalized_cnv.loc[val_patients_idx, :]
-        X_test = self.normalized_cnv.loc[test_patients_idx, :]
-        scaler.fit(X_train)  # fit on train set
-        self.normalized_cnv.loc[train_patients_idx, :] = scaler.transform(X_train)
-        self.normalized_cnv.loc[val_patients_idx, :] = scaler.transform(X_val)
-        self.normalized_cnv.loc[test_patients_idx, :] = scaler.transform(X_test)
+        # # Normalize CNV
+        # self.normalized_cnv = deepcopy(self.cnv)
+        # X_train = self.normalized_cnv.loc[train_patients_idx, :]
+        # X_val = self.normalized_cnv.loc[val_patients_idx, :]
+        # X_test = self.normalized_cnv.loc[test_patients_idx, :]
+        # scaler.fit(X_train)  # fit on train set
+        # self.normalized_cnv.loc[train_patients_idx, :] = scaler.transform(X_train)
+        # self.normalized_cnv.loc[val_patients_idx, :] = scaler.transform(X_val)
+        # self.normalized_cnv.loc[test_patients_idx, :] = scaler.transform(X_test)
 
 
         # train_indices = [i for i, patient in enumerate(self.patient_list) if patient in train_patients]
@@ -163,17 +188,17 @@ class Multimodal_Bio_Dataset(Dataset):
         return train_patients, val_patients, test_patients
     
     def normalize_genomics(self, train_patients, val_patients=None, test_patients=None):
-        mask = np.isin(train_patients, self.patient_df.index)
+        mask = np.isin(train_patients, self.patient_df.join(self.genomics, how="inner").index)
         filtered_train_patients = train_patients[mask]
         if len(filtered_train_patients) != len(train_patients):
             print("Some train patients are not in the dataset: ", set(train_patients) - set(filtered_train_patients))
         if val_patients is not None:
-            mask = np.isin(val_patients, self.patient_df.index)
+            mask = np.isin(val_patients, self.patient_df.join(self.genomics, how="inner").index)
             filtered_val_patients = val_patients[mask]
             if len(filtered_val_patients) != len(val_patients):
                 print("Some val patients are not in the dataset: ", set(val_patients) - set(filtered_val_patients))
         if test_patients is not None:
-            mask = np.isin(test_patients, self.patient_df.index)
+            mask = np.isin(test_patients, self.patient_df.join(self.genomics, how="inner").index)
             filtered_test_patients = test_patients[mask]
             if len(filtered_test_patients) != len(test_patients):
                 print("Some test patients are not in the dataset: ", set(test_patients) - set(filtered_test_patients))
@@ -202,17 +227,17 @@ class Multimodal_Bio_Dataset(Dataset):
             self.normalized_genomics.loc[test_patients_idx, :] = scaler.transform(X_test)
 
     def normalize_cnv(self, train_patients, val_patients=None, test_patients=None):
-        mask = np.isin(train_patients, self.patient_df.index)
+        mask = np.isin(train_patients, self.patient_df.join(self.cnv, how="inner").index)
         filtered_train_patients = train_patients[mask]
         if len(filtered_train_patients) != len(train_patients):
             print("Some train patients are not in the dataset: ", set(train_patients) - set(filtered_train_patients))
         if val_patients is not None:
-            mask = np.isin(val_patients, self.patient_df.index)
+            mask = np.isin(val_patients, self.patient_df.join(self.cnv, how="inner").index)
             filtered_val_patients = val_patients[mask]
             if len(filtered_val_patients) != len(val_patients):
                 print("Some val patients are not in the dataset: ", set(val_patients) - set(filtered_val_patients))
         if test_patients is not None:
-            mask = np.isin(test_patients, self.patient_df.index)
+            mask = np.isin(test_patients, self.patient_df.join(self.cnv, how="inner").index)
             filtered_test_patients = test_patients[mask]
             if len(filtered_test_patients) != len(test_patients):
                 print("Some test patients are not in the dataset: ", set(test_patients) - set(filtered_test_patients))
@@ -319,8 +344,25 @@ class Multimodal_Bio_Dataset(Dataset):
     def __getitem__(self, index):
         # Retrieve data from the dataframe based on the index
         row  = self.patient_df.loc[index]
-        genomics = torch.tensor(self.normalized_genomics.loc[index].values, dtype=torch.float32)
-        cnv = torch.tensor(self.normalized_cnv.loc[index].values, dtype=torch.float32)
+        WSI_status = True
+        if index not in self.normalized_genomics.index:           
+           genomics = {key: torch.zeros(self.GE_selected_genes_groups[key]["count"]) for key in self.GE_selected_genes_groups.keys()}
+           genomics_status = False
+        else:
+            genomics = {}
+            for key in self.GE_selected_genes_groups:
+                ensg_gene_id_list = self.GE_selected_genes_groups[key]["ensg_gene_id"]
+                genomics[key] = torch.tensor(self.normalized_genomics[ensg_gene_id_list].loc[index].values, dtype=torch.float32)
+            genomics_status = True
+        if index not in self.normalized_cnv.index:
+            cnv = {key: torch.zeros(self.GE_selected_genes_groups[key]["count"]) for key in self.CNV_selected_genes_groups.keys()}
+            cnv_status = False
+        else:
+            cnv = {}
+            for key in self.CNV_selected_genes_groups:
+                ensg_gene_id_list = self.CNV_selected_genes_groups[key]["ensg_gene_id"]
+                cnv[key] = torch.tensor(self.normalized_cnv[ensg_gene_id_list].loc[index].values, dtype=torch.float32)
+            cnv_status = True
         dataset_name = row["dataset_name"]
         tissue_type_filter = self.datasets[dataset_name].tissue_type_filter
         slide_list = self.patient_dict[row[self.case_id_name]]
@@ -343,7 +385,10 @@ class Multimodal_Bio_Dataset(Dataset):
                             'patch_features': patch_features, 
                             'mask': mask,
                             'genomics': genomics,
-                            'cnv': cnv
+                            'cnv': cnv,
+                            'WSI_status': WSI_status,
+                            'genomics_status': genomics_status,
+                            'cnv_status': cnv_status
                         }, 
                 'label': label, 
                 'censorship': censorship, 

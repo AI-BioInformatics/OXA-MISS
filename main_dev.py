@@ -272,6 +272,7 @@ if __name__ == "__main__":
                 len_val = 0
             test_patients = split_df["val"].dropna().values.astype(str)
             dataset.normalize_genomics(train_patients, val_patients, test_patients)
+            dataset.normalize_cnv(train_patients, val_patients, test_patients)
             train_dataloader, val_dataloader, test_dataloader = get_dataloaders(    
                                                                                     dataset=dataset,
                                                                                     train_patients=train_patients, 

@@ -28,6 +28,20 @@ from sklearn.metrics import roc_auc_score, confusion_matrix,f1_score
 #     plt.ylabel('Survival Probability')
 #     plt.legend()
 #     plt.savefig('/work/H2020DeciderFicarra/D2_4/chemorefractory/MultimodalDecider/km.png') 
+def move_to_device(data, device):
+    if isinstance(data, dict):
+        # Recursively call for each value in the dictionary
+        return {key: move_to_device(value, device) for key, value in data.items()}
+    elif isinstance(data, list):
+        # Recursively call for each item in the list
+        return [move_to_device(value, device) for value in data]
+    elif isinstance(data, torch.Tensor):
+        # Move tensor to the device
+        return data.to(device)
+    else:
+        # If not a tensor or a collection, return the value as is
+        return data 
+
 
 def KaplanMeier_plot(log_dict):
     all_event_times = np.array(log_dict["all_event_times"])

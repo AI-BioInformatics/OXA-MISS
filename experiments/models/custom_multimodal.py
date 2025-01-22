@@ -79,29 +79,34 @@ def SNN_Block(dim1, dim2, dropout=0.25):
 class Custom_Multimodal(nn.Module):
     def __init__(self, 
                     input_dim=1024, 
-                    genomics_input_dim = 20361,
-                    genomics_dropout = 0.5,
-                    cnv_input_dim = 20361,
-                    cnv_dropout = 0.5,
+                    genomics_group_name = ["high_refractory", "high_sensitive", "hypoxia_pathway"],
+                    genomics_group_input_dim = [25, 35, 31],
+                    genomics_group_dropout =   [0.5, 0.5, 0.5],
+                    cnv_group_name = ["high_refractory", "high_sensitive", "hypoxia_pathway"],
+                    cnv_group_input_dim = [25, 35, 31],
+                    cnv_group_dropout =   [0.5, 0.5, 0.5],
                     inner_dim=64, 
                     output_dim=4, 
                     num_latent_queries=4,
                     use_layernorm=False, 
                     dropout=0.0,
                     input_modalities = ["WSI", "Genomics", "CNV"],
+                    fusion_type = "sum" # "concatenate" or "sum"
                     ):
         super(Custom_Multimodal,self).__init__()
         self.input_modalities = input_modalities
+        self.inner_dim = inner_dim
         self.inner_proj = nn.Linear(input_dim, inner_dim)
         self.output_dim = output_dim
         self.device="cuda" if torch.cuda.is_available() else "cpu"
         self.num_latent_queries = num_latent_queries
         self.use_layernorm = use_layernorm
+        self.fusion_type = fusion_type
         self.dropout = nn.Dropout(dropout)
         if self.use_layernorm:
             self.layernorm = nn.LayerNorm(inner_dim)
             self.layernorm_latent = nn.LayerNorm(inner_dim)
-        self.latent_queries = nn.Parameter(torch.randn(num_latent_queries, inner_dim))
+        self.latent_queries = nn.Parameter(torch.randn(1, num_latent_queries, inner_dim))
         self.W_k = nn.Linear(inner_dim, inner_dim)
         self.tanh = nn.Tanh()
         self.relu = nn.ReLU()
@@ -109,26 +114,39 @@ class Custom_Multimodal(nn.Module):
         self.sigmoid = nn.Sigmoid()
         self.fc = nn.Linear(num_latent_queries*inner_dim, inner_dim)
 
-        self.genomics_dropout = nn.Dropout(genomics_dropout)
-        self.fc_genomics = nn.Sequential(
-                                            nn.Linear(genomics_input_dim, inner_dim),
-                                            nn.ReLU(),
-                                            nn.Linear(inner_dim, inner_dim),
-                                        )    
-        self.fc_cnv = nn.Sequential(
-                                            nn.Linear(cnv_input_dim, inner_dim),
+        self.genomic_encoder = {}
+        for name, input_dim, rate in zip(genomics_group_name, genomics_group_input_dim, genomics_group_dropout):
+            self.genomic_encoder[name] = nn.Sequential(
+                                            nn.Dropout(rate),
+                                            nn.Linear(input_dim, inner_dim),
                                             nn.ReLU(),
                                             nn.Linear(inner_dim, inner_dim),
                                         ) 
+        self.genomic_encoder = nn.ModuleDict(self.genomic_encoder)
+
+        self.cnv_encoder = {}
+        for name, input_dim, rate in zip(cnv_group_name, cnv_group_input_dim, cnv_group_dropout):
+            self.cnv_encoder[name] = nn.Sequential(
+                                            nn.Dropout(rate),
+                                            nn.Linear(input_dim, inner_dim),
+                                            nn.ReLU(),
+                                            nn.Linear(inner_dim, inner_dim),
+                                        )
+        self.cnv_encoder = nn.ModuleDict(self.cnv_encoder)
 
         # Output layer
-        final_layer_input_dim = 0
-        if "WSI" in input_modalities:
-            final_layer_input_dim += inner_dim
-        if "Genomics" in input_modalities:
-            final_layer_input_dim += inner_dim
-        if "CNV" in input_modalities:
-            final_layer_input_dim += inner_dim
+        if fusion_type == "concatenate":
+            final_layer_input_dim = 0
+            if "WSI" in input_modalities:
+                final_layer_input_dim += inner_dim
+            if "Genomics" in input_modalities:
+                final_layer_input_dim += inner_dim
+            if "CNV" in input_modalities:
+                final_layer_input_dim += inner_dim
+        elif fusion_type == "sum":
+            final_layer_input_dim = inner_dim
+        else:
+            raise ValueError("Invalid fusion type. Choose between 'concatenate' or 'sum'.")
             
         self.output_layer = nn.Linear(final_layer_input_dim, output_dim)
 
@@ -155,15 +173,17 @@ class Custom_Multimodal(nn.Module):
         # Extract patch features
         if "WSI" in self.input_modalities:
             x = data['patch_features']  # x is a dictionary with key 'patch_features'
+            batch_size, seq_len = x.size(0), x.size(1)
             mask = data['mask']
-            x = x[~mask.bool()].unsqueeze(0)
+            # x = x[~mask.bool()].unsqueeze(0)
             x = self.inner_proj(x)
-            
+                        
             if self.use_layernorm:
                 x = self.layernorm(x)  
                 latent_queries = self.layernorm_latent(self.latent_queries)      
             else:
                 latent_queries = self.latent_queries 
+            latent_queries = latent_queries.expand(batch_size, -1, -1)
             
             # Apply attention mechanism
             gate = self.sigmoid(self.gate(x))
@@ -172,6 +192,9 @@ class Custom_Multimodal(nn.Module):
             scores /= torch.sqrt(torch.tensor(keys.size(-1)).float())
             scores = gate.transpose(-1,-2) * scores
             A_out = scores
+            mask = mask * -1e9
+            mask = mask.unsqueeze(1).expand_as(scores)
+            scores = scores + mask
             scores = F.softmax(scores, dim=-1)
             latent = torch.matmul(scores, x)
             latent = latent.flatten(start_dim=1)
@@ -182,24 +205,51 @@ class Custom_Multimodal(nn.Module):
             
         if "Genomics" in self.input_modalities:
             genomics = data["genomics"]
-            genomics = self.genomics_dropout(genomics)
-            # Final Genomic embedding
-            genomics_embedding = self.fc_genomics(genomics)
+            genomics_embedding = torch.zeros((genomics[list(genomics.keys())[0]].shape[0], 
+                                                self.inner_dim), 
+                                                device=genomics[list(genomics.keys())[0]].device)
+            for key in data["genomics"].keys():
+                genomics[key] = genomics[key][data["genomics_status"]]
+            if genomics[key].size(0) > 0:
+                genomics_groups = []            
+                for i, key in enumerate(data["genomics"].keys()):
+                    genomics_group_i = genomics[key]
+                    genomics_group_i = self.genomic_encoder[key](genomics_group_i)
+                    genomics_groups.append(genomics_group_i)           
+                genomics_intermediate = sum(genomics_groups)
+                genomics_embedding[data["genomics_status"]] = genomics_intermediate
+
 
         if "CNV" in self.input_modalities:
             cnv = data["cnv"]
-            cnv = self.genomics_dropout(cnv)
-            # Final CNV embedding
-            cnv_embedding = self.fc_cnv(cnv)
+            cnv_embedding = torch.zeros((cnv[list(cnv.keys())[0]].shape[0], 
+                                            self.inner_dim), 
+                                            device=cnv[list(cnv.keys())[0]].device)
+            for key in data["cnv"].keys():
+                cnv[key] = cnv[key][data["cnv_status"]]
+            if cnv[key].size(0) > 0:
+                cnv_groups = []
+                for i, key in enumerate(data["cnv"].keys()):
+                    cnv_group_i = cnv[key]
+                    cnv_group_i = self.cnv_encoder[key](cnv_group_i)
+                    cnv_groups.append(cnv_group_i)
+                cnv_intermediate = sum(cnv_groups)
+                cnv_embedding[data["cnv_status"]] = cnv_intermediate
 
         modalities = []
-        if "WSI" in self.input_modalities:
+        if "WSI" in self.input_modalities and data["WSI_status"].any().item() is True:
             modalities.append(wsi_embedding)
-        if "Genomics" in self.input_modalities:
+        if "Genomics" in self.input_modalities and data["genomics_status"].any().item() is True:
             modalities.append(genomics_embedding)
-        if "CNV" in self.input_modalities:
+        if "CNV" in self.input_modalities and data["cnv_status"].any().item() is True:
             modalities.append(cnv_embedding)
-        x = torch.cat(modalities, dim=1)
+
+        if self.fusion_type == "sum":
+            x = sum(modalities)
+        elif self.fusion_type == "concatenate":
+            x = torch.cat(modalities, dim=1)
+        else:
+            raise ValueError("Invalid fusion type. Choose between 'concatenate' or 'sum'.")
 
         # Output layer
         logits = self.output_layer(x)  # Shape: (batch_size, output_dim)
