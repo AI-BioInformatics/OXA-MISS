@@ -139,7 +139,11 @@ if __name__ == "__main__":
     now = datetime.now()
     config.title = f'{config.title}_YY{todays_date.year}-MM{str(todays_date.month).zfill(2)}-DD{str(todays_date.day).zfill(2)}-HH{now.hour:02}-MM{now.minute:02}_{timehash()}'
     parent_directory = os.path.join(config.project_dir, config.title)
-    checkpoint_model = os.path.join(parent_directory, 'checkpoint.pt')
+    # checkpoint_file_name = 'checkpoint.pt'
+    checkpoint_last_epoch = os.path.join(parent_directory, 'model_last_epoch.pt')
+    checkpoint_model_lowest_loss = os.path.join(parent_directory, 'model_lowest_loss.pt')
+    checkpoint_model_highest_metric = os.path.join(parent_directory, 'model_highest_metric.pt')
+    # checkpoint_model = os.path.join(parent_directory, checkpoint_file_name)
     os.makedirs(parent_directory, exist_ok=True)
     logging.info(f'project directory: {parent_directory}')
 
@@ -174,16 +178,19 @@ if __name__ == "__main__":
                             eps=config.data_loader.eps,
                             sample=config.data_loader.sample,
                             load_slides_in_RAM=config.data_loader.load_slides_in_RAM,
+                            file_genes_group=config.data_loader.file_genes_group,
                         )
     # GET INDICES FOR TRAIN, VALIDATION, AND TEST SETS
     train_patients, val_patients, test_patients = dataset.get_train_test_val_splits(
-                                                                                    train_size=config.data_loader.train_size, 
-                                                                                    val_size=config.data_loader.val_size, 
-                                                                                    test_size=config.data_loader.test_size, 
-                                                                                    random_state=config.data_loader.random_state
+                                                                                train_size=config.data_loader.train_size, 
+                                                                                val_size=config.data_loader.val_size, 
+                                                                                test_size=config.data_loader.test_size, 
+                                                                                random_state=config.data_loader.random_state
                                                                                 )
-    dataset.normalize_genomics(train_patients, val_patients, test_patients)
-    dataset.normalize_cnv(train_patients, val_patients, test_patients)
+    if hasattr(config.data_loader, 'genomics_path'):
+        dataset.normalize_genomics(train_patients, val_patients, test_patients)
+    if hasattr(config.data_loader, 'cnv_path'):
+        dataset.normalize_cnv(train_patients, val_patients, test_patients)
     train_dataloader, val_dataloader, test_dataloader = get_dataloaders(            
                                                                         dataset=dataset,
                                                                         train_patients=train_patients, 
@@ -212,13 +219,15 @@ if __name__ == "__main__":
                     test_dataloader, 
                     task_type=config.data_loader.task_type, 
                     debug=args.debug, 
-                    checkpoint=checkpoint_model, 
+                    checkpoint_last_epoch=checkpoint_last_epoch, 
+                    checkpoint_model_highest_metric=checkpoint_model_highest_metric,
+                    checkpoint_model_lowest_loss=checkpoint_model_lowest_loss,
                     device=config.model.device, 
                     path=f"{parent_directory}", 
                     config=config)
         mm.evaluate(test_dataloader, 
                     task_type=config.data_loader.task_type, 
-                    checkpoint=checkpoint_model, 
+                    checkpoint=checkpoint_last_epoch, 
                     best=True, 
                     device=config.model.device, 
                     path=f"{parent_directory}")
@@ -263,6 +272,12 @@ if __name__ == "__main__":
             logging.info(f'Fold {i+1}...')
             split_df = pd.read_csv(split_path)
             train_patients = split_df["train"].values.astype(str)
+            # AGGIUNTO:
+            # val_patients = split_df["val"].values.astype(str)
+            # len_val = len(val_patients)
+
+            # TOLTO:
+
             if config.data_loader.KFold.internal_val_size > 0.0:
                 np.random.shuffle(train_patients)
                 val_patients = train_patients[:int(len(train_patients)*config.data_loader.KFold.internal_val_size)]
@@ -271,9 +286,14 @@ if __name__ == "__main__":
             else:
                 val_patients = None
                 len_val = 0
+            
+            # MODIFICATO:
             test_patients = split_df["val"].dropna().values.astype(str)
-            dataset.normalize_genomics(train_patients, val_patients, test_patients)
-            dataset.normalize_cnv(train_patients, val_patients, test_patients)
+            # test_patients = split_df["test"].dropna().values.astype(str)
+            if hasattr(config.data_loader, 'genomics_path'):
+                dataset.normalize_genomics(train_patients, val_patients, test_patients)
+            if hasattr(config.data_loader, 'cnv_path'):
+                dataset.normalize_cnv(train_patients, val_patients, test_patients)
             train_dataloader, val_dataloader, test_dataloader = get_dataloaders(    
                                                                                     dataset=dataset,
                                                                                     train_patients=train_patients, 
@@ -296,7 +316,11 @@ if __name__ == "__main__":
                         val_dataloader, 
                         test_dataloader, 
                         task_type=config.data_loader.task_type, 
-                        checkpoint=checkpoint_model, 
+                        # checkpoint=checkpoint_model.replace('.pt',f'_fold_{i+1}.pt' ), 
+                        # checkpoint=checkpoint_model, 
+                        checkpoint_last_epoch=checkpoint_last_epoch, 
+                        checkpoint_model_highest_metric=checkpoint_model_highest_metric,
+                        checkpoint_model_lowest_loss=checkpoint_model_lowest_loss,
                         device=config.model.device, 
                         path=f"{parent_directory}", 
                         kfold=foldname, 
@@ -308,13 +332,16 @@ if __name__ == "__main__":
                 best = False
             mm.evaluate(test_dataloader, 
                         task_type=config.data_loader.task_type, 
-                        checkpoint=checkpoint_model, 
+                        checkpoint_last_epoch=checkpoint_last_epoch, 
+                        checkpoint_model_highest_metric=checkpoint_model_highest_metric,
+                        checkpoint_model_lowest_loss=checkpoint_model_lowest_loss,
                         best=best, 
                         device=config.model.device, 
                         path=f"{parent_directory}", 
-                        kfold=foldname)
+                        kfold=foldname,
+                        log_aggregated = i==len(splits)-1)
             
-        mm.log_aggregated(parent_directory)
+        # mm.log_aggregated(parent_directory)
 
     end_time = time.time() 
     execution_time = end_time - start_time

@@ -20,6 +20,7 @@ class Multimodal_Bio_Dataset(Dataset):
                         eps=1e-6,
                         sample=True,
                         load_slides_in_RAM=False,
+                        file_genes_group='/work/H2020DeciderFicarra/D2_4/datasets/DECIDER_cohorts/Gene_expression/Expression/daria_mapped.json'
                         ):
         self.task_type = task_type
         self.load_slides_in_RAM = load_slides_in_RAM
@@ -54,14 +55,13 @@ class Multimodal_Bio_Dataset(Dataset):
             # load genomics data
             # if 'genomics_path' in config.parameters:
             
+            # daria_json_path = "/work/H2020DeciderFicarra/D2_4/datasets/DECIDER_cohorts/Gene_expression/Expression/daria_mapped.json"
+            # daria_json_path = "/work/H2020DeciderFicarra/D2_4/datasets/DECIDER_cohorts/Gene_expression/Expression/daria_mapped_2.json"
+
             if hasattr(config.parameters, 'genomics_path'):
                 genomics = pd.read_csv(config.parameters.genomics_path, sep="\t").set_index("patient")
-                chatgpt = "/work/H2020DeciderFicarra/D2_4/datasets/DECIDER_cohorts/Gene_expression/Expression/chatgpt_gene_to_ensg_mapping.csv"
-                nature = "/work/H2020DeciderFicarra/D2_4/datasets/DECIDER_cohorts/Gene_expression/Expression/gene_to_ensg_mapping.csv"
-                daria1 = "/work/H2020DeciderFicarra/D2_4/datasets/DECIDER_cohorts/Gene_expression/Expression/daria1_gene_to_ensg_mapping.csv"
-                daria2 = "/work/H2020DeciderFicarra/D2_4/datasets/DECIDER_cohorts/Gene_expression/Expression/daria2_gene_to_ensg_mapping.csv"
-                daria_json_path = "/work/H2020DeciderFicarra/D2_4/datasets/DECIDER_cohorts/Gene_expression/Expression/daria_mapped.json"
-                with open(daria_json_path, 'r') as f:
+                
+                with open(file_genes_group, 'r') as f:
                     self.GE_selected_genes_groups = json.load(f)
                 self.GE_selected_gene_set = set()
                 for key in self.GE_selected_genes_groups:
@@ -74,13 +74,7 @@ class Multimodal_Bio_Dataset(Dataset):
 
             if hasattr(config.parameters, 'cnv_path'):
                 cnv = pd.read_csv(config.parameters.cnv_path, sep="\t").set_index("patient")
-                chatgpt = "/work/H2020DeciderFicarra/D2_4/datasets/DECIDER_cohorts/Gene_expression/Expression/chatgpt_gene_to_ensg_mapping.csv"
-                nature = "/work/H2020DeciderFicarra/D2_4/datasets/DECIDER_cohorts/Gene_expression/Expression/gene_to_ensg_mapping.csv"
-                daria1 = "/work/H2020DeciderFicarra/D2_4/datasets/DECIDER_cohorts/Gene_expression/Expression/daria1_gene_to_ensg_mapping.csv"
-                daria2 = "/work/H2020DeciderFicarra/D2_4/datasets/DECIDER_cohorts/Gene_expression/Expression/daria2_gene_to_ensg_mapping.csv"
-                # selected_genes = pd.read_csv(daria2)
-                daria_json_path = "/work/H2020DeciderFicarra/D2_4/datasets/DECIDER_cohorts/Gene_expression/Expression/daria_mapped.json"
-                with open(daria_json_path, 'r') as f:
+                with open(file_genes_group, 'r') as f:
                     self.CNV_selected_genes_groups = json.load(f)
                 self.CNV_selected_gene_set = set()
                 for key in self.CNV_selected_genes_groups:
@@ -345,24 +339,30 @@ class Multimodal_Bio_Dataset(Dataset):
         # Retrieve data from the dataframe based on the index
         row  = self.patient_df.loc[index]
         WSI_status = True
-        if index not in self.normalized_genomics.index:           
+        if hasattr(self, 'normalized_genomics') and index not in self.normalized_genomics.index:           
            genomics = {key: torch.zeros(self.GE_selected_genes_groups[key]["count"]) for key in self.GE_selected_genes_groups.keys()}
            genomics_status = False
         else:
             genomics = {}
-            for key in self.GE_selected_genes_groups:
-                ensg_gene_id_list = self.GE_selected_genes_groups[key]["ensg_gene_id"]
-                genomics[key] = torch.tensor(self.normalized_genomics[ensg_gene_id_list].loc[index].values, dtype=torch.float32)
-            genomics_status = True
-        if index not in self.normalized_cnv.index:
+            if hasattr(self, 'GE_selected_genes_groups'):
+                for key in self.GE_selected_genes_groups:
+                    ensg_gene_id_list = self.GE_selected_genes_groups[key]["ensg_gene_id"]
+                    genomics[key] = torch.tensor(self.normalized_genomics[ensg_gene_id_list].loc[index].values, dtype=torch.float32)
+                genomics_status = True
+            else:
+                genomics_status = False
+        if hasattr(self, 'normalized_cnv') and index not in self.normalized_cnv.index:
             cnv = {key: torch.zeros(self.GE_selected_genes_groups[key]["count"]) for key in self.CNV_selected_genes_groups.keys()}
             cnv_status = False
         else:
             cnv = {}
-            for key in self.CNV_selected_genes_groups:
-                ensg_gene_id_list = self.CNV_selected_genes_groups[key]["ensg_gene_id"]
-                cnv[key] = torch.tensor(self.normalized_cnv[ensg_gene_id_list].loc[index].values, dtype=torch.float32)
-            cnv_status = True
+            if hasattr(self, 'CNV_selected_genes_groups'):
+                for key in self.CNV_selected_genes_groups:
+                    ensg_gene_id_list = self.CNV_selected_genes_groups[key]["ensg_gene_id"]
+                    cnv[key] = torch.tensor(self.normalized_cnv[ensg_gene_id_list].loc[index].values, dtype=torch.float32)
+                cnv_status = True
+            else:
+                cnv_status = False
         dataset_name = row["dataset_name"]
         tissue_type_filter = self.datasets[dataset_name].tissue_type_filter
         slide_list = self.patient_dict[row[self.case_id_name]]

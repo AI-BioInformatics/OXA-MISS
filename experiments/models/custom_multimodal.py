@@ -81,13 +81,14 @@ class Custom_Multimodal(nn.Module):
                     input_dim=1024, 
                     genomics_group_name = ["high_refractory", "high_sensitive", "hypoxia_pathway"],
                     genomics_group_input_dim = [25, 35, 31],
-                    genomics_group_dropout =   [0.5, 0.5, 0.5],
+                    genomics_group_dropout =   [0.2, 0.2, 0.2],
                     cnv_group_name = ["high_refractory", "high_sensitive", "hypoxia_pathway"],
                     cnv_group_input_dim = [25, 35, 31],
-                    cnv_group_dropout =   [0.5, 0.5, 0.5],
+                    cnv_group_dropout =   [0.2, 0.2, 0.2],
                     inner_dim=64, 
                     output_dim=4, 
                     num_latent_queries=4,
+                    wsi_dropout=0.2,
                     use_layernorm=False, 
                     dropout=0.0,
                     input_modalities = ["WSI", "Genomics", "CNV"],
@@ -101,6 +102,7 @@ class Custom_Multimodal(nn.Module):
         self.num_latent_queries = num_latent_queries
         self.use_layernorm = use_layernorm
         self.fusion_type = fusion_type
+        self.wsi_dropout = nn.Dropout(wsi_dropout)
         self.dropout = nn.Dropout(dropout)
         if self.use_layernorm:
             self.layernorm = nn.LayerNorm(inner_dim)
@@ -112,6 +114,10 @@ class Custom_Multimodal(nn.Module):
         self.gate = nn.Linear(inner_dim, 1)
         self.sigmoid = nn.Sigmoid()
         self.fc = nn.Linear(num_latent_queries*inner_dim, inner_dim)
+
+        # self.layernorm_wsi_embeddings = nn.LayerNorm(inner_dim)
+        # self.layernorm_genomics_embedding= nn.LayerNorm(inner_dim)
+        # self.layernorm_cnv_embedding = nn.LayerNorm(inner_dim)
 
         self.genomic_encoder = {}
         for name, input_dim, rate in zip(genomics_group_name, genomics_group_input_dim, genomics_group_dropout):
@@ -188,6 +194,7 @@ class Custom_Multimodal(nn.Module):
             scores = torch.matmul(latent_queries, keys.transpose(1, 2))
             scores /= torch.sqrt(torch.tensor(keys.size(-1)).float())
             scores = gate.transpose(-1,-2) * scores
+            scores = self.wsi_dropout(scores)
             A_out = scores
             scores = F.softmax(scores, dim=-1)
             latent = torch.matmul(scores, x)
@@ -196,6 +203,8 @@ class Custom_Multimodal(nn.Module):
             #Extract high level features
             # latent = self.tanh(latent)
             wsi_embedding = self.fc(latent)
+
+            # wsi_embedding = self.layernorm_wsi_embeddings(wsi_embedding)
             
         if "Genomics" in self.input_modalities and data["genomics_status"].item() is True:
             genomics = data["genomics"]
@@ -206,6 +215,8 @@ class Custom_Multimodal(nn.Module):
                 genomics_groups.append(genomics_group_i)           
             genomics_embedding = sum(genomics_groups)
 
+            # genomics_embedding = self.layernorm_genomics_embedding(genomics_embedding)
+
         if "CNV" in self.input_modalities and data["cnv_status"].item() is True:
             cnv = data["cnv"]
             cnv_groups = []
@@ -214,6 +225,8 @@ class Custom_Multimodal(nn.Module):
                 cnv_group_i = self.cnv_encoder[key](cnv_group_i)
                 cnv_groups.append(cnv_group_i)
             cnv_embedding = sum(cnv_groups)
+
+            # cnv_embedding = self.layernorm_cnv_embedding(cnv_embedding)
 
         modalities = []
         if "WSI" in self.input_modalities and data["WSI_status"].item() is True:
@@ -231,6 +244,7 @@ class Custom_Multimodal(nn.Module):
             raise ValueError("Invalid fusion type. Choose between 'concatenate' or 'sum'.")
 
         # Output layer
+        x = self.dropout(x)
         logits = self.output_layer(x)  # Shape: (batch_size, output_dim)
         
         if "WSI" in self.input_modalities:

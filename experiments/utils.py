@@ -8,26 +8,9 @@ from lifelines import KaplanMeierFitter
 from lifelines.statistics import logrank_test
 from sklearn.metrics import confusion_matrix
 from sklearn.metrics import roc_auc_score, confusion_matrix,f1_score
+from sksurv.metrics import concordance_index_censored
 
-# def KaplanMeier_plot_deprecated(log_dict):        
-#     all_event_times = np.array(log_dict["all_event_times"])
-#     all_censorships = np.array(log_dict["all_censorships"])
-#     all_risk_scores = np.array(log_dict["all_risk_scores"])
-#     mean_risk_score = np.mean(all_risk_scores)
-#     high_risk_events = all_event_times[all_risk_scores >= mean_risk_score]
-#     low_risk_events = all_event_times[all_risk_scores < mean_risk_score]
 
-#     kmf = KaplanMeierFitter()
-#     kmf.fit(high_risk_events, event_observed=(1 - all_censorships[all_risk_scores >= mean_risk_score]))
-#     kmf.plot(label='High Risk')
-#     kmf.fit(low_risk_events, event_observed=(1 - all_censorships[all_risk_scores < mean_risk_score]))
-#     kmf.plot(label='Low Risk')
-
-#     plt.title('Kaplan-Meier Survival Curve')
-#     plt.xlabel('Time')
-#     plt.ylabel('Survival Probability')
-#     plt.legend()
-#     plt.savefig('/work/H2020DeciderFicarra/D2_4/chemorefractory/MultimodalDecider/km.png') 
 def move_to_device(data, device):
     if isinstance(data, dict):
         # Recursively call for each value in the dictionary
@@ -137,14 +120,13 @@ def accuracy_confusionMatrix_plot(log_dict, metrics_df):
     # Return the PIL Image object to be logged later
     return image
 
-def kfold_results_merge(result_id_path):
-    prefisso = "last_epoch_test_df_Fold_"
-    # cartella = f"/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/results/{result_id}"
-    cartella = result_id_path
+def kfold_results_merge(result_id_path, prefix='last_epoch_test_df_Fold_', task_type='Survival'):
+    # folder = f"/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/results/{result_id}"
+    folder = result_id_path
     paths = [
         os.path.join(result_id_path,f)
-        for f in os.listdir(cartella)
-        if os.path.isfile(os.path.join(cartella, f)) and f.startswith(prefisso)
+        for f in os.listdir(folder)
+        if os.path.isfile(os.path.join(folder, f)) and f.startswith(prefix)
     ]
 
     dfs = [pd.read_hdf(path).set_index('patient_ids') for path in paths]
@@ -154,29 +136,37 @@ def kfold_results_merge(result_id_path):
         is_loo_case = len(dfs[0]['all_labels']) == 1
     
     df = pd.concat(dfs)
+    
+    if task_type == 'Survival':
+        all_risk_scores = df["all_risk_scores"].values
+        all_censorships = df["all_censorships"].values
+        all_event_times = df["all_event_times"].values
+        c_index = concordance_index_censored((1-all_censorships).astype(bool), all_event_times, all_risk_scores, tied_tol=1e-08)[0]        
+        out = {"c-index": c_index}
 
-    all_labels = df["all_labels"].values
-    all_predictions = df["treatment_response_predictions"].values
-    all_logits = torch.tensor(df["treatment_response_logits"].tolist())
+
+    elif task_type == 'Treatment_Response':
+        all_labels = df["all_labels"].values
+        all_predictions = df["treatment_response_predictions"].values
+        all_logits = torch.tensor(df["treatment_response_logits"].tolist())
+        
+        logits_for_auc = torch.softmax(all_logits, dim=1).numpy()[:, 1]
+        auc = roc_auc_score(all_labels, logits_for_auc)    
+        f1 = f1_score(all_labels, all_predictions, average='macro')
+        accuracy = np.mean(all_labels == all_predictions) 
+        metrics_df = pd.DataFrame({"AUC": [auc], "F1-Score": [f1], "Accuracy": [accuracy]})
+        
+        log_dict = {"all_labels": all_labels, "treatment_response_predictions": all_predictions}
+        image =  accuracy_confusionMatrix_plot(log_dict, metrics_df)
     
-    logits_for_auc = torch.softmax(all_logits, dim=1).numpy()[:, 1]
-    auc = roc_auc_score(all_labels, logits_for_auc)    
-    f1 = f1_score(all_labels, all_predictions, average='macro')
-    accuracy = np.mean(all_labels == all_predictions) 
-    metrics_df = pd.DataFrame({"AUC": [auc], "F1-Score": [f1], "Accuracy": [accuracy]})
+        out = {
+            "AUC" : auc,
+            "Accuracy" : accuracy,
+            "F1-Score" : f1
+        }
     
-    log_dict = {"all_labels": all_labels, "treatment_response_predictions": all_predictions}
-    image =  accuracy_confusionMatrix_plot(log_dict, metrics_df)
-    
-    out = {
-        "AUC" : auc,
-        "Accuracy" : accuracy,
-        "F1-Score" : f1
-    }
-    
-    if is_loo_case:
-        return out
-    out["Confusion_Matrix"] = image
+    if not is_loo_case:
+        out["Confusion_Matrix"] = image
     return out
 
 def predTime_vs_actualTime_confusionMatrix_plot(self, log_dict):
