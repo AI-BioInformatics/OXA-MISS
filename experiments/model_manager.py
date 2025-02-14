@@ -167,17 +167,17 @@ class ModelManager():
     def __reload_net__(self, path, device='cuda'):
         if device == 'cuda':
             logging.info(f'\nRestoring model weigths from: {path}')
-            self.net = torch.load(path)
+            self.net = torch.load(path, weights_only=False)
         else:
             logging.info(f'\nRestoring model weigths from: {path}')
-            self.net = torch.load(path, map_location=torch.device('cpu'))
+            self.net = torch.load(path, map_location=torch.device('cpu'), weights_only=False)
 
     def load_checkpoint(self, path, device='cpu'):
         if device == 'cuda':
-            weights = torch.load(path)["state_dict"] 
+            weights = torch.load(path, weights_only=False)["state_dict"] 
             self.net.load_state_dict(weights, strict=False) 
         else:
-            weights   =  torch.load(path, map_location=torch.device(device))["state_dict"] 
+            weights   =  torch.load(path, map_location=torch.device(device), weights_only=False)["state_dict"] 
             self.net.load_state_dict(weights, strict=False) 
 
     def calculate_risk(self, h):
@@ -651,7 +651,7 @@ class ModelManager():
                 checkpoint_splitted_lowest_l = checkpoint_model_lowest_loss.split(".")
                 checkpoint_lowest_l = f"{checkpoint_splitted_lowest_l[0]}{df_fold_suffix}.pt"
 
-                model_lowest_l = torch.load(checkpoint_lowest_l)
+                model_lowest_l = torch.load(checkpoint_lowest_l, weights_only=False)
                 models.append(model_lowest_l)
                 summary_paths.append('Lowest_Validation_Loss_Model/Test')
                 h5_prefixes.append('lowest_val_loss_test_df')
@@ -660,7 +660,7 @@ class ModelManager():
                 checkpoint_splitted_highest_m = checkpoint_model_highest_metric.split(".")
                 checkpoint_highest_m = f"{checkpoint_splitted_highest_m[0]}{df_fold_suffix}.pt"
 
-                model_highest_m = torch.load(checkpoint_highest_m)
+                model_highest_m = torch.load(checkpoint_highest_m, weights_only=False)
                 models.append(model_highest_m)
                 summary_paths.append('Highest_Validation_Metric_Model/Test')
                 h5_prefixes.append('highest_val_metric_test_df')
@@ -668,7 +668,7 @@ class ModelManager():
                 
 
                 
-            last_model = torch.load(checkpoint_last_epoch)
+            last_model = torch.load(checkpoint_last_epoch, weights_only=False)
             logging.info("\n Evalate best model")
         else:
             last_model = self.net

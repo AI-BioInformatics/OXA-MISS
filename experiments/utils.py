@@ -133,7 +133,7 @@ def kfold_results_merge(result_id_path, prefix='last_epoch_test_df_Fold_', task_
 
     is_loo_case = False
     if len(dfs):
-        is_loo_case = len(dfs[0]['all_labels']) == 1
+        is_loo_case = len(dfs[0]) == 1
     
     df = pd.concat(dfs)
     

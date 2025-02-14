@@ -35,5 +35,5 @@ class ABMIL(nn.Module):
         
         # Output layer
         output = self.output_layer(weighted_sum)  # Shape: (batch_size, output_dim)
-        
+        output = {'output': output}
         return output
