@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.nn.init as init
+torch.autograd.set_detect_anomaly(True)
 
 def select_high_variance_patches_pytorch(embeddings, num_selected_patches):
     """
@@ -76,7 +77,54 @@ def SNN_Block(dim1, dim2, dropout=0.25):
             nn.ELU(),
             nn.AlphaDropout(p=dropout, inplace=False))
 
-class Custom_Multimodal(nn.Module):
+class CrossAttentionBlock(nn.Module):
+    def __init__(self, dim, num_heads=1, dropout=0.1):
+        super(CrossAttentionBlock, self).__init__()
+        self.num_heads = num_heads
+        self.dim = dim
+        self.scale = dim ** -0.5
+
+        self.query = nn.Linear(dim, dim)
+        self.key = nn.Linear(dim, dim)
+        self.value = nn.Linear(dim, dim)
+
+        self.attn_drop = nn.Dropout(dropout)
+        self.proj = nn.Linear(dim, dim)
+        self.proj_drop = nn.Dropout(dropout)
+
+    def forward(self, x, context):
+        B, N, C = x.shape
+
+        q = self.query(x).reshape(B, N, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)
+        k = self.key(context).reshape(B, -1, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)
+        v = self.value(context).reshape(B, -1, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)
+
+        attn = (q @ k.transpose(-2, -1)) * self.scale
+        attn = attn.softmax(dim=-1)
+        attn = self.attn_drop(attn)
+
+        x = (attn @ v).transpose(1, 2).reshape(B, N, C)
+        x = self.proj(x)
+        x = self.proj_drop(x)
+
+        return x, attn
+    
+class FeedForwardLayer(nn.Module):
+    def __init__(self, input_dim, hidden_dim, output_dim, dropout=0.1):
+        super(FeedForwardLayer, self).__init__()
+        self.linear1 = nn.Linear(input_dim, hidden_dim)
+        self.dropout = nn.Dropout(dropout)
+        self.linear2 = nn.Linear(hidden_dim, output_dim)
+        self.relu = nn.ReLU()
+
+    def forward(self, x):
+        x = self.linear1(x)
+        x = self.relu(x)
+        x = self.dropout(x)
+        x = self.linear2(x)
+        return x
+
+class Custom_Multimodal_XA(nn.Module):
     def __init__(self, 
                     input_dim=1024, 
                     genomics_group_name = ["high_refractory", "high_sensitive", "hypoxia_pathway"],
@@ -92,9 +140,15 @@ class Custom_Multimodal(nn.Module):
                     use_layernorm=False, 
                     dropout=0.0,
                     input_modalities = ["WSI", "Genomics", "CNV"],
-                    fusion_type = "sum" # "concatenate" or "sum"
+                    fusion_type="sum", # "concatenate" or "sum"
+                    
+                    use_WSI_level_embs= True, # False True 
+                    WSI_level_embs_fusion_type= "concat", # sum | concat
+                    WSI_level_encoder_dropout= 0.3,
+                    WSI_level_encoder_sizes= [768, 60, 10],
+                    WSI_level_encoder_LayerNorm= True
                     ):
-        super(Custom_Multimodal,self).__init__()
+        super(Custom_Multimodal_XA,self).__init__()
         self.input_modalities = input_modalities
         self.inner_proj = nn.Linear(input_dim, inner_dim)
         self.output_dim = output_dim
@@ -114,6 +168,14 @@ class Custom_Multimodal(nn.Module):
         self.gate = nn.Linear(inner_dim, 1)
         self.sigmoid = nn.Sigmoid()
         self.fc = nn.Linear(num_latent_queries*inner_dim, inner_dim)
+
+        self.patches_XA = CrossAttentionBlock(inner_dim)
+        self.patches_FF = FeedForwardLayer(inner_dim, inner_dim, inner_dim)
+        self.genomics_XA = CrossAttentionBlock(inner_dim)
+        self.genomics_FF = FeedForwardLayer(inner_dim, inner_dim, inner_dim)
+        self.cnv_XA = CrossAttentionBlock(inner_dim)
+        self.cnv_FF = FeedForwardLayer(inner_dim, inner_dim, inner_dim)
+
 
         # self.layernorm_wsi_embeddings = nn.LayerNorm(inner_dim)
         # self.layernorm_genomics_embedding= nn.LayerNorm(inner_dim)
@@ -176,35 +238,21 @@ class Custom_Multimodal(nn.Module):
 
     def forward(self, data):
         # Extract patch features
-        if "WSI" in self.input_modalities:
-            x = data['patch_features']  # x is a dictionary with key 'patch_features'
+        if "WSI" in self.input_modalities and data["WSI_status"].item() is True:
+            patch_embeddings = data['patch_features']  # data is a dictionary with key 'patch_features'
             mask = data['mask']
-            x = x[~mask.bool()].unsqueeze(0)
-            x = self.inner_proj(x)
+            patch_embeddings = patch_embeddings[~mask.bool()].unsqueeze(0)
+            patch_embeddings = self.inner_proj(patch_embeddings)
             
             if self.use_layernorm:
-                x = self.layernorm(x)  
+                patch_embeddings = self.layernorm(patch_embeddings)  
                 latent_queries = self.layernorm_latent(self.latent_queries)      
             else:
                 latent_queries = self.latent_queries 
             
             # Apply attention mechanism
-            gate = self.sigmoid(self.gate(x))
-            keys = self.W_k(x)
-            scores = torch.matmul(latent_queries, keys.transpose(1, 2))
-            scores /= torch.sqrt(torch.tensor(keys.size(-1)).float())
-            scores = gate.transpose(-1,-2) * scores
-            scores = self.wsi_dropout(scores)
-            A_out = scores
-            scores = F.softmax(scores, dim=-1)
-            latent = torch.matmul(scores, x)
-            latent = latent.flatten(start_dim=1)
+            gate = self.sigmoid(self.gate(patch_embeddings))
 
-            #Extract high level features
-            # latent = self.tanh(latent)
-            wsi_embedding = self.fc(latent)
-
-            # wsi_embedding = self.layernorm_wsi_embeddings(wsi_embedding)
             
         if "Genomics" in self.input_modalities and data["genomics_status"].item() is True:
             genomics = data["genomics"]
@@ -213,7 +261,8 @@ class Custom_Multimodal(nn.Module):
                 genomics_group_i = genomics[key]
                 genomics_group_i = self.genomic_encoder[key](genomics_group_i)
                 genomics_groups.append(genomics_group_i)           
-            genomics_embedding = sum(genomics_groups)
+            genomics_embedding = torch.stack(genomics_groups, dim=1)
+            
 
             # genomics_embedding = self.layernorm_genomics_embedding(genomics_embedding)
 
@@ -224,9 +273,83 @@ class Custom_Multimodal(nn.Module):
                 cnv_group_i = cnv[key]
                 cnv_group_i = self.cnv_encoder[key](cnv_group_i)
                 cnv_groups.append(cnv_group_i)
-            cnv_embedding = sum(cnv_groups)
+            cnv_embedding = torch.stack(cnv_groups, dim=1)
 
             # cnv_embedding = self.layernorm_cnv_embedding(cnv_embedding)
+
+        XA_attentions = {}
+        if "WSI" in self.input_modalities and data["WSI_status"].item() is True:
+            if "Genomics" in self.input_modalities and data["genomics_status"].item() is True:
+                x, att_patches_to_genomics = self.patches_XA(patch_embeddings, genomics_embedding)
+            else:
+                att_patches_to_genomics = None
+            if "CNV" in self.input_modalities and data["cnv_status"].item() is True:
+                y, att_patches_to_cnv = self.patches_XA(patch_embeddings, genomics_embedding)
+            else:
+                att_patches_to_cnv = None
+            if "Genomics" in self.input_modalities and data["genomics_status"].item() is True:
+                patch_embeddings = patch_embeddings + x   
+            if "CNV" in self.input_modalities and data["cnv_status"].item() is True:
+                patch_embeddings = patch_embeddings + y 
+            XA_attentions["att_patches_to_genomics"] = att_patches_to_genomics.detach() if att_patches_to_genomics is not None else None
+            XA_attentions["att_patches_to_cnv"] =  att_patches_to_cnv.detach() if att_patches_to_cnv is not None else None
+            
+            # x = self.patches_FF(patch_embeddings)
+            # patch_embeddings = patch_embeddings + x
+            keys = self.W_k(patch_embeddings)
+            scores = torch.matmul(latent_queries, keys.transpose(1, 2))
+            scores /= torch.sqrt(torch.tensor(keys.size(-1)).float())
+            scores = gate.transpose(-1,-2) * scores # scores + log(gate+eps)
+            scores = self.wsi_dropout(scores)
+            A_out = scores
+            scores = F.softmax(scores, dim=-1)
+            latent = torch.matmul(scores, patch_embeddings)
+            latent = latent.flatten(start_dim=1)
+
+            #Extract high level features
+            # latent = self.tanh(latent)
+            wsi_embedding = self.fc(latent)
+
+        if "Genomics" in self.input_modalities and data["genomics_status"].item() is True:
+            if "WSI" in self.input_modalities and data["WSI_status"].item() is True:
+                x, att_genomics_to_patches = self.genomics_XA(genomics_embedding, patch_embeddings)
+            else:
+                att_genomics_to_patches = None
+            if "CNV" in self.input_modalities and data["cnv_status"].item() is True:
+                y, att_genomics_to_cnv = self.genomics_XA(genomics_embedding, cnv_embedding)
+            else:
+                att_genomics_to_cnv = None
+            if "WSI" in self.input_modalities and data["WSI_status"].item() is True:
+                genomics_embedding = genomics_embedding + x
+            if "CNV" in self.input_modalities and data["cnv_status"].item() is True:
+                genomics_embedding = genomics_embedding + y
+            XA_attentions["att_genomics_to_patches"] = att_genomics_to_patches.detach() if att_genomics_to_patches is not None else None
+            XA_attentions["att_genomics_to_cnv"] = att_genomics_to_cnv.detach() if att_genomics_to_cnv is not None else None
+
+            # x = self.genomics_FF(genomics_embedding)
+            # genomics_embedding = genomics_embedding + x
+            genomics_embedding = genomics_embedding.sum(dim=1, keepdim=False)
+
+
+        if "CNV" in self.input_modalities and data["cnv_status"].item() is True:
+            if "WSI" in self.input_modalities and data["WSI_status"].item() is True:
+                x, att_cnv_to_patches = self.cnv_XA(cnv_embedding, patch_embeddings)
+            else:
+                att_cnv_to_patches = None
+            if "Genomics" in self.input_modalities and data["genomics_status"].item() is True:
+                y, att_cnv_to_genomics = self.cnv_XA(cnv_embedding, genomics_embedding)
+            else:
+                att_cnv_to_genomics = None
+            if "WSI" in self.input_modalities and data["WSI_status"].item() is True:
+                cnv_embedding = cnv_embedding + x
+            if "Genomics" in self.input_modalities and data["genomics_status"].item() is True:
+                cnv_embedding = cnv_embedding + y
+            XA_attentions["att_cnv_to_patches"] = att_cnv_to_patches.detach() if att_cnv_to_patches is not None else None
+            XA_attentions["att_cnv_to_genomics"] = att_cnv_to_genomics.detach() if att_cnv_to_genomics is not None else None
+
+            # x = self.cnv_FF(cnv_embedding)
+            # cnv_embedding = cnv_embedding + x
+            cnv_embedding = cnv_embedding.sum(dim=1, keepdim=False)
 
         modalities = []
         if "WSI" in self.input_modalities and data["WSI_status"].item() is True:
@@ -248,7 +371,7 @@ class Custom_Multimodal(nn.Module):
         logits = self.output_layer(x)  # Shape: (batch_size, output_dim)
         
         if "WSI" in self.input_modalities:
-            output = {'output': logits, 'attention': A_out}
+            output = {'output': logits, 'attention': A_out, 'XA_attentions': XA_attentions}
         else:
-            output = {'output': logits}
+            output = {'output': logits, 'XA_attentions': XA_attentions}
         return output

@@ -37,7 +37,7 @@ model:
   save_checkpoints: True
   kwargs:
     input_dim: 1024
-    inner_dim: 64
+    inner_dim: 384
     dropout: 0.0 # 0.5
     output_dim: 4
   device: cuda

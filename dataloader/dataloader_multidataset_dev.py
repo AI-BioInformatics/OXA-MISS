@@ -20,8 +20,11 @@ class Multimodal_Bio_Dataset(Dataset):
                         eps=1e-6,
                         sample=True,
                         load_slides_in_RAM=False,
-                        file_genes_group='/work/H2020DeciderFicarra/D2_4/datasets/DECIDER_cohorts/Gene_expression/Expression/daria_mapped.json'
+                        file_genes_group='/work/H2020DeciderFicarra/D2_4/datasets/DECIDER_cohorts/Gene_expression/Expression/daria_mapped.json',
+
+                        use_WSI_level_embs=False
                         ):
+        self.use_WSI_level_embs = use_WSI_level_embs
         self.task_type = task_type
         self.load_slides_in_RAM = load_slides_in_RAM
         if self.load_slides_in_RAM:
@@ -112,6 +115,7 @@ class Multimodal_Bio_Dataset(Dataset):
         ############################
         # maybe wrap this into a function
         # self.patient_df = self.patient_df[self.patient_df.index.isin(self.genomics.index)]
+        # if hasattr(config.parameters, 'genomics_path'):
         # self.patient_df = self.patient_df[self.patient_df.index.isin(self.cnv.join(self.genomics, rsuffix="zio_", how="inner").index)]
         self.patient_list = list(self.patient_df.index)
         ############################
@@ -147,31 +151,33 @@ class Multimodal_Bio_Dataset(Dataset):
         val_patients = patients[train_end:val_end]
         test_patients = patients[val_end:]
 
-        train_patients_idx = pd.Index(train_patients)
-        val_patients_idx = pd.Index(val_patients)
-        test_patients_idx = pd.Index(test_patients)
+        # train_patients_idx = pd.Index(train_patients)
+        # val_patients_idx = pd.Index(val_patients)
+        # test_patients_idx = pd.Index(test_patients)
 
-        # # Normalize Genomics
-        # self.normalized_genomics = deepcopy(self.genomics)
-        # X_train = self.normalized_genomics.loc[train_patients_idx, :]
-        # X_val = self.normalized_genomics.loc[val_patients_idx, :]
-        # X_test = self.normalized_genomics.loc[test_patients_idx, :]
-        # scaler = StandardScaler()
-        # scaler.fit(X_train)  # fit on train set
-        # # Transform entire subsets of the copied DataFrame
-        # self.normalized_genomics.loc[train_patients_idx, :] = scaler.transform(X_train)
-        # self.normalized_genomics.loc[val_patients_idx, :] = scaler.transform(X_val)
-        # self.normalized_genomics.loc[test_patients_idx, :] = scaler.transform(X_test)
+        # Normalize Genomics
+        # if hasattr(self, 'genomics'):
+        #     self.normalized_genomics = deepcopy(self.genomics)
+        #     X_train = self.normalized_genomics.loc[train_patients_idx, :]
+        #     X_val = self.normalized_genomics.loc[val_patients_idx, :]
+        #     X_test = self.normalized_genomics.loc[test_patients_idx, :]
+        #     scaler = StandardScaler()
+        #     scaler.fit(X_train)  # fit on train set
+        #     # Transform entire subsets of the copied DataFrame
+        #     self.normalized_genomics.loc[train_patients_idx, :] = scaler.transform(X_train)
+        #     self.normalized_genomics.loc[val_patients_idx, :] = scaler.transform(X_val)
+        #     self.normalized_genomics.loc[test_patients_idx, :] = scaler.transform(X_test)
 
         # # Normalize CNV
-        # self.normalized_cnv = deepcopy(self.cnv)
-        # X_train = self.normalized_cnv.loc[train_patients_idx, :]
-        # X_val = self.normalized_cnv.loc[val_patients_idx, :]
-        # X_test = self.normalized_cnv.loc[test_patients_idx, :]
-        # scaler.fit(X_train)  # fit on train set
-        # self.normalized_cnv.loc[train_patients_idx, :] = scaler.transform(X_train)
-        # self.normalized_cnv.loc[val_patients_idx, :] = scaler.transform(X_val)
-        # self.normalized_cnv.loc[test_patients_idx, :] = scaler.transform(X_test)
+        # if hasattr(self, 'cnv'):
+        #     self.normalized_cnv = deepcopy(self.cnv)
+        #     X_train = self.normalized_cnv.loc[train_patients_idx, :]
+        #     X_val = self.normalized_cnv.loc[val_patients_idx, :]
+        #     X_test = self.normalized_cnv.loc[test_patients_idx, :]
+        #     scaler.fit(X_train)  # fit on train set
+        #     self.normalized_cnv.loc[train_patients_idx, :] = scaler.transform(X_train)
+        #     self.normalized_cnv.loc[val_patients_idx, :] = scaler.transform(X_val)
+        #     self.normalized_cnv.loc[test_patients_idx, :] = scaler.transform(X_test)
 
 
         # train_indices = [i for i, patient in enumerate(self.patient_list) if patient in train_patients]
@@ -285,23 +291,32 @@ class Multimodal_Bio_Dataset(Dataset):
                 - mask : torch.Tensor
 
             """
-            patch_features = []
-            pt_files_path = self.datasets[dataset_name].pt_files_path
-            # load all slide_names corresponding for the patient
-            for slide_id in slide_names:
-                if self.load_slides_in_RAM:
-                    if slide_id in self.slides_cache:
-                        wsi_bag = self.slides_cache[slide_id]
+            def get_features(path, suffix=""):
+                patch_features = []
+                pt_files_path = path
+                # load all slide_names corresponding for the patient
+                for slide_id in slide_names:
+                    if self.load_slides_in_RAM:
+                        if slide_id+suffix in self.slides_cache:
+                            wsi_bag = self.slides_cache[slide_id+suffix]
+                        else:
+                            wsi_path = os.path.join(pt_files_path, '{}.pt'.format(slide_id))
+                            wsi_bag = torch.load(wsi_path, weights_only=True, map_location="cpu")
+                            self.slides_cache[slide_id+suffix] = wsi_bag
                     else:
                         wsi_path = os.path.join(pt_files_path, '{}.pt'.format(slide_id))
-                        wsi_bag = torch.load(wsi_path, weights_only=True, map_location="cpu")
-                        self.slides_cache[slide_id] = wsi_bag
-                else:
-                    wsi_path = os.path.join(pt_files_path, '{}.pt'.format(slide_id))
-                    wsi_bag = torch.load(wsi_path, weights_only=True, map_location="cpu") # changed to True due to python warning
-                patch_features.append(wsi_bag)
-            patch_features = torch.cat(patch_features, dim=0)
-            # print("patch_features.shape[0]: ", patch_features.shape[0])
+                        wsi_bag = torch.load(wsi_path, weights_only=True, map_location="cpu") # changed to True due to python warning
+                    patch_features.append(wsi_bag)
+                patch_features = torch.cat(patch_features, dim=0)
+                return patch_features
+
+            patch_features = get_features(self.datasets[dataset_name].pt_files_path)
+            wsi_features = []
+            if self.use_WSI_level_embs:
+                for path in self.datasets[dataset_name].pt_files_path_SLIDE_LEVEL:
+                    wsi_features.append(get_features(path, suffix="_TITAN"))
+                if wsi_features:
+                    wsi_features = torch.cat(wsi_features, dim=0)
 
             if self.sample:
                 max_patches = self.max_patches
@@ -326,7 +341,7 @@ class Multimodal_Bio_Dataset(Dataset):
             else:
                 mask = torch.zeros([patch_features.shape[0]])
 
-            return patch_features, mask
+            return wsi_features, patch_features, mask
 
     def get_tissue_type(self, slide_name):
         _, tissue_type, _, _ = extract_names(slide_name)
@@ -339,7 +354,7 @@ class Multimodal_Bio_Dataset(Dataset):
         # Retrieve data from the dataframe based on the index
         row  = self.patient_df.loc[index]
         WSI_status = True
-        if hasattr(self, 'normalized_genomics') and index not in self.normalized_genomics.index:           
+        if (hasattr(self, 'normalized_genomics') and index not in self.normalized_genomics.index) or not hasattr(self, 'normalized_genomics'):           
            genomics = {key: torch.zeros(self.GE_selected_genes_groups[key]["count"]) for key in self.GE_selected_genes_groups.keys()}
            genomics_status = False
         else:
@@ -351,7 +366,7 @@ class Multimodal_Bio_Dataset(Dataset):
                 genomics_status = True
             else:
                 genomics_status = False
-        if hasattr(self, 'normalized_cnv') and index not in self.normalized_cnv.index:
+        if (hasattr(self, 'normalized_cnv') and index not in self.normalized_cnv.index) or not hasattr(self, 'normalized_cnv'):
             cnv = {key: torch.zeros(self.GE_selected_genes_groups[key]["count"]) for key in self.CNV_selected_genes_groups.keys()}
             cnv_status = False
         else:
@@ -366,9 +381,14 @@ class Multimodal_Bio_Dataset(Dataset):
         dataset_name = row["dataset_name"]
         tissue_type_filter = self.datasets[dataset_name].tissue_type_filter
         slide_list = self.patient_dict[row[self.case_id_name]]
+        
+        # bad_slides = ['8005_Ome_1009677_269186_ImageActual']
+        # for bad_slide in bad_slides:
+        #     if bad_slide in slide_list: slide_list.remove(bad_slide) 
+        
         if dataset_name == "Decider":
             slide_list = [slide for slide in slide_list if self.get_tissue_type(slide) in tissue_type_filter]
-        patch_features, mask = self._load_wsi_embs_from_path(dataset_name, slide_list)
+        wsi_features, patch_features, mask = self._load_wsi_embs_from_path(dataset_name, slide_list) 
         label = row['label']
         if self.task_type == "Survival":
             censorship = row["censorship"]
@@ -384,6 +404,7 @@ class Multimodal_Bio_Dataset(Dataset):
                 'input':{   
                             'patch_features': patch_features, 
                             'mask': mask,
+                            'wsi_features': wsi_features,
                             'genomics': genomics,
                             'cnv': cnv,
                             'WSI_status': WSI_status,

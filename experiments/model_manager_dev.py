@@ -7,7 +7,6 @@ from torch.backends import cudnn
 import torch.nn.functional as F
 import wandb
 import logging
-from .models import *
 from scipy import stats
 import math
 from .loss.loss_func import NLLSurvLoss
@@ -19,25 +18,29 @@ from lifelines.statistics import logrank_test
 from sklearn.metrics import roc_auc_score, confusion_matrix,f1_score
 import matplotlib.pyplot as plt
 import seaborn as sns
-import io
+import io, copy
 from PIL import Image
-from .utils import accuracy_confusionMatrix_plot, kfold_results_merge, move_to_device
+from .utils import accuracy_confusionMatrix_plot, kfold_results_merge, move_to_device, import_class_from_path
 # from .metrics.loss_func import NLLSurvLoss
 # from .scheduler import *
-
-DEBUG_BATCHES = 100000
+from adam_atan2_pytorch import AdoptAtan2
+DEBUG_BATCHES = 64
 
 class ModelManager():
     def __init__(self,
-                 config
+                 config, 
+                 ModelClass
                  ):
         self.config = config
         self.device = config.model.device
         self.real_batch_size = config.data_loader.real_batch_size
         self.NUM_ACCUMULATION_STEPS = self.real_batch_size//config.data_loader.batch_size
 
-        self.net = self.__build__()
+        self.net = ModelClass(**self.config.model.kwargs)               
         self.net.to(self.device)
+
+        if self.config.trainer.do_kfold and self.config.data_loader.KFold.internal_val_size > 0 and self.config.trainer.epochs // 100 == 0:
+            self.config.trainer.epochs *= 10 
 
         if self.config.data_loader.batch_size <= self.config.data_loader.real_batch_size:
             reduction = 'mean'
@@ -57,43 +60,6 @@ class ModelManager():
         except:
             self.clip_grad_norm_max_norm = None
         wandb.watch(self.net, log_freq=100)
-
-    def __build__(self):
-        if self.config.model.name == "BaselineModel":
-            model = BaselineModel(**self.config.model.kwargs)
-            return model
-        if self.config.model.name == "ABMIL":
-            model = ABMIL(**self.config.model.kwargs)
-            return model
-        if self.config.model.name == "ABMIL_Tangle":
-            model = ABMIL_Tangle(**self.config.model.kwargs)
-            return model
-        if self.config.model.name == "ABMIL_Tweak":
-            model = ABMIL_Tweak(**self.config.model.kwargs)
-            return model
-        if self.config.model.name == "MaxPooling":
-            model = MaxPooling(**self.config.model.kwargs)
-            return model
-        if self.config.model.name == "Custom":
-            model = Custom(**self.config.model.kwargs)
-            return model
-        if self.config.model.name == "Custom_Multimodal":
-            model = Custom_Multimodal(**self.config.model.kwargs)
-            return model
-        if self.config.model.name == "Custom_Multimodal_BS":
-            model = Custom_Multimodal_BS(**self.config.model.kwargs)
-            return model        
-        if self.config.model.name == "TransMIL":
-            model = TransMIL(**self.config.model.kwargs)
-            return model
-        if self.config.model.name == "MIL_Attention_FC_surv":
-            model = MIL_Attention_FC_surv(**self.config.model.kwargs)
-            return model
-        if self.config.model.name == "LinearProbe":
-            model = LinearProbe(**self.config.model.kwargs)
-            return model
-        else:
-            raise Exception(f"{self.config.model.name} is not supported!")
         
     def __getLossFunction__(self):
         if self.config.loss.name == "NLLSurvLoss":
@@ -108,7 +74,10 @@ class ModelManager():
             raise Exception(f"{self.config.loss.name} is not supported!")
 
     def __getOptimizer__(self):
-        if self.config.optimizer.name == "Adam":
+        if self.config.optimizer.name == "AdoptAtan2":
+            return AdoptAtan2(self.net.parameters(), 
+                              lr = self.config.optimizer.learning_rate)
+        elif self.config.optimizer.name == "Adam":
             return optim.Adam(self.parameters_to_optimize,
                               lr=self.config.optimizer.learning_rate,
                               weight_decay=self.config.optimizer.weight_decay,
@@ -130,6 +99,7 @@ class ModelManager():
             return optim.SGD(params=self.parameters_to_optimize, lr=self.config.optimizer.learning_rate, 
                              weight_decay=self.config.optimizer.weight_decay, 
                              momentum=self.config.optimizer.momentum)        
+        
         else:
             raise Exception(f"{self.config.optimizer.name} is not supported!")
 
@@ -160,17 +130,17 @@ class ModelManager():
     def __reload_net__(self, path, device='cuda'):
         if device == 'cuda':
             logging.info(f'\nRestoring model weigths from: {path}')
-            self.net = torch.load(path)
+            self.net = torch.load(path, weights_only=False)
         else:
             logging.info(f'\nRestoring model weigths from: {path}')
-            self.net = torch.load(path, map_location=torch.device('cpu'))
+            self.net = torch.load(path, map_location=torch.device('cpu'), weights_only=False)
 
     def load_checkpoint(self, path, device='cpu'):
         if device == 'cuda':
-            weights = torch.load(path)["state_dict"] 
+            weights = torch.load(path, weights_only=False)["state_dict"] 
             self.net.load_state_dict(weights, strict=False) 
         else:
-            weights   =  torch.load(path, map_location=torch.device(device))["state_dict"] 
+            weights   =  torch.load(path, map_location=torch.device(device), weights_only=False)["state_dict"] 
             self.net.load_state_dict(weights, strict=False) 
 
     def calculate_risk(self, h):
@@ -233,7 +203,10 @@ class ModelManager():
 
             logits_for_auc = torch.softmax(all_logits, dim=1).numpy()[:, 1]
             if len(logits_for_auc) > 1:
-                auc = roc_auc_score(all_labels, logits_for_auc)    
+                if np.unique(all_labels).size>1:
+                    auc = roc_auc_score(all_labels, logits_for_auc)    
+                else:
+                    auc = np.nan
                 f1 = f1_score(all_labels, all_predictions, average='macro')
                 accuracy = np.mean(all_labels == all_predictions)     
             else:
@@ -268,7 +241,7 @@ class ModelManager():
 
    
 
-    def step(self, batch, log_dict, task_type="Survival", device="cuda"):
+    def step(self, batch, log_dict, task_type="Survival", device="cuda", model=None):
         batch_data = batch['input']
         labels = batch['label'] #  check this casting        
         #batch_data = {key: value.to(device) if isinstance(value, torch.Tensor) else value for key, value in batch_data.items()} 
@@ -278,8 +251,8 @@ class ModelManager():
         if len(labels.shape) == 1:
             labels = labels.reshape(-1,1)    
   
-        
-        result = self.net(batch_data)
+        model = model if model != None else self.net
+        result = model(batch_data) # per TITANS funziona model(batch_data['patch_features'].squeeze(0).long())
         outputs = result['output']
 
         if task_type == "Survival":
@@ -319,7 +292,9 @@ class ModelManager():
                     eval_dataloader=None, 
                     test_dataloader=None, 
                     task_type="Survival", 
-                    checkpoint="example/nn_model.pt", 
+                    checkpoint_last_epoch='{path}/model_last_epoch.pt',
+                    checkpoint_model_lowest_loss = '{path}/model_lowest_loss.pt', 
+                    checkpoint_model_highest_metric = '{path}/model_highest_metric.pt',
                     device="cuda", 
                     debug=False, 
                     path="example", 
@@ -330,11 +305,20 @@ class ModelManager():
         validationLoss = []
         testLoss = []
         lowest_val_loss = np.inf
-        highest_mean_f1_auc = -1
+        highest_val_metric_monitor = -1
         STOP = False
         df_fold_suffix = f"_{kfold}"
         log_fold_string = f"/{kfold}"
 
+        model_last_epoch = None
+        model_highest_metric = None
+        model_lowest_loss = None
+
+        if kfold != "":
+            checkpoint_splitted_last = checkpoint_last_epoch.split(".")
+            checkpoint_last_epoch = f"{checkpoint_splitted_last[0]}{df_fold_suffix}.pt"
+
+        
         for epoch in range(self.config.trainer.epochs):
             if STOP:
                 logging.info(f'\nSTOPPED at epoch {epoch}')
@@ -393,6 +377,8 @@ class ModelManager():
                 else:
                     raise Exception(f"Batch size > real batch size is not supported!")               
                 batch_numb += 1
+            model_last_epoch = copy.deepcopy(self.net)
+            model_last_epoch.to('cpu')
             tloss = np.array(tloss)
             tloss = np.mean(tloss) # bisognerebbe cambiarlo in base alla reduction della loss
             trainLoss.append(tloss)
@@ -454,6 +440,11 @@ class ModelManager():
                 val_df = pd.DataFrame(log_dict)                
                 val_df.to_hdf(f"{path}/val_df{df_fold_suffix}.h5", key="df", mode="w")
                 val_metrics_dict = self.compute_metrics_df(val_df, task_type)
+                if task_type == "Treatment_Response":
+                    val_metric_monitor = (val_metrics_dict['AUC'] + val_metrics_dict['F1-Score']) / 2 
+                else:
+                    val_metric_monitor = val_metrics_dict["c-index"]
+                                
                 val_metrics_df = pd.DataFrame(val_metrics_dict, index=[0])
                 val_metrics_df.to_csv(f"{path}/val_metrics{df_fold_suffix}.csv")
                 if task_type == "Treatment_Response":
@@ -501,7 +492,6 @@ class ModelManager():
                 test_df.to_hdf(f"{path}/test_df{df_fold_suffix}.h5", key="df", mode="w")
                 test_metrics_dict = self.compute_metrics_df(test_df, task_type)
                 test_metrics_df = pd.DataFrame(test_metrics_dict, index=[0])
-                mean_f1_auc = (test_metrics_dict['AUC'] + test_metrics_dict['F1-Score']) / 2 
                 test_metrics_df.to_csv(f"{path}/test_metrics{df_fold_suffix}.csv")
                 if task_type == "Treatment_Response":
                     test_confusion_matrix = accuracy_confusionMatrix_plot(log_dict, test_metrics_df)
@@ -531,30 +521,29 @@ class ModelManager():
                 self.scheduler.step()
             # Early stopping
             if eval_dataloader is not None:
-                
-                if mean_f1_auc > highest_mean_f1_auc:
-                    highest_mean_f1_auc = mean_f1_auc
+
+                if val_metric_monitor > highest_val_metric_monitor:
+                    highest_val_metric_monitor = val_metric_monitor
                     
-                    highest_mean_f1_auc_epoch = epoch + 1
+                    highest_val_metric_monitor_epoch = epoch + 1
                     logging.info(
-                        f"############################################ New highest_mean_f1_auc reached: {highest_mean_f1_auc} #########################")
-                    # if kfold != "":
-                    #     checkpoint_splitted = checkpoint.split(".")
-                    #     checkpoint = f"{checkpoint_splitted[0]}{df_fold_suffix}.pt"
-                    # torch.save(self.net, checkpoint)
-                    wandb.run.summary["Highest_Metric/Epoch"] = highest_mean_f1_auc_epoch
-                    # wandb.run.summary["Lowest_Validation_Loss/Validation_Loss"] = lowest_val_loss
-                    # wandb.run.summary["Lowest_Validation_Loss/Validation_c-index"] = val_metrics_dict["c-index"],
+                        f"############################################ New highest_val_metric_monitor reached: {highest_val_metric_monitor} #########################")
+                    
+                    model_highest_metric = copy.deepcopy(self.net)
+                    model_highest_metric.to('cpu')
+                    wandb.run.summary["Highest_Metric/Epoch"] = highest_val_metric_monitor_epoch
                     for key, value in val_metrics_dict.items():
                         wandb.run.summary[f"Highest_Metric/Valid{log_fold_string}/{key}"] = value
                         
                     
-                    train_df.to_hdf(f"{path}/best_train_df_highest_mean_f1_auc{df_fold_suffix}.h5", key="df", mode="w")
-                    train_metrics_df.to_csv(f"{path}/best_train_metrics_highest_mean_f1_auc{df_fold_suffix}.csv")
-                    val_df.to_hdf(f"{path}/best_val_df_highest_mean_f1_auc{df_fold_suffix}.h5", key="df", mode="w")
-                    val_metrics_df.to_csv(f"{path}/best_val_metrics_highest_mean_f1_auc{df_fold_suffix}.csv")  
+                    train_df.to_hdf(f"{path}/best_train_df_highest_metric{df_fold_suffix}.h5", key="df", mode="w")
+                    train_metrics_df.to_csv(f"{path}/best_train_metrics_highest_metric{df_fold_suffix}.csv")
 
-                
+                    val_df.to_hdf(f"{path}/best_val_df_highest_metric{df_fold_suffix}.h5", key="df", mode="w")
+                    val_metrics_df.to_csv(f"{path}/best_val_metrics_highest_metric{df_fold_suffix}.csv")  
+
+                    test_df.to_hdf(f"{path}/best_test_df_highest_metric{df_fold_suffix}.h5", key="df", mode="w")
+                    test_metrics_df.to_csv(f"{path}/best_test_metrics_highest_metric{df_fold_suffix}.csv") 
 
                 if vloss < lowest_val_loss:
                     lowest_val_loss = vloss
@@ -562,102 +551,175 @@ class ModelManager():
                     lowest_val_loss_epoch = epoch + 1
                     logging.info(
                         f"############################################ New lowest_val_loss reached: {lowest_val_loss} #########################")
-                    if kfold != "":
-                        checkpoint_splitted = checkpoint.split(".")
-                        checkpoint = f"{checkpoint_splitted[0]}{df_fold_suffix}.pt"
-                    torch.save(self.net, checkpoint)
+                    # if kfold != "":
+                    #     checkpoint_splitted = checkpoint.split(".")
+                    #     checkpoint = f"{checkpoint_splitted[0]}{df_fold_suffix}.pt"
+                    # torch.save(self.net, checkpoint)
+                    model_lowest_loss = copy.deepcopy(self.net)
+                    model_lowest_loss.to('cpu')
                     wandb.run.summary["Lowest_Validation_Loss/Epoch"] = lowest_val_loss_epoch
                     # wandb.run.summary["Lowest_Validation_Loss/Validation_Loss"] = lowest_val_loss
                     # wandb.run.summary["Lowest_Validation_Loss/Validation_c-index"] = val_metrics_dict["c-index"],
                     for key, value in val_metrics_dict.items():
                         wandb.run.summary[f"Lowest_Validation_Loss/Valid{log_fold_string}/{key}"] = value
                     # # wandb.run.summary["Lowest_Validation_Loss/Validation_KM"] = val_metrics_dict["KM"],
-                    train_df.to_hdf(f"{path}/best_train_df_lowest_val_loss{df_fold_suffix}.h5", key="df", mode="w")
-                    train_metrics_df.to_csv(f"{path}/best_train_metrics_lowest_val_loss{df_fold_suffix}.csv")
-                    val_df.to_hdf(f"{path}/best_val_df_lowest_val_loss{df_fold_suffix}.h5", key="df", mode="w")
-                    val_metrics_df.to_csv(f"{path}/best_val_metrics_lowest_val_loss{df_fold_suffix}.csv")                
+                    train_df.to_hdf(f"{path}/best_train_df_lowest_loss{df_fold_suffix}.h5", key="df", mode="w")
+                    train_metrics_df.to_csv(f"{path}/best_train_metrics_lowest_loss{df_fold_suffix}.csv")
+
+                    val_df.to_hdf(f"{path}/best_val_df_lowest_loss{df_fold_suffix}.h5", key="df", mode="w")
+                    val_metrics_df.to_csv(f"{path}/best_val_metrics_lowest_loss{df_fold_suffix}.csv")      
+
+                    test_df.to_hdf(f"{path}/best_test_df_lowest_loss{df_fold_suffix}.h5", key="df", mode="w")
+                    test_metrics_df.to_csv(f"{path}/best_test_metrics_lowest_loss{df_fold_suffix}.csv")    
+
                 elif patience_counter == self.config.trainer.patience:
                     logging.info(f"End of training phase - Patience threshold reached\nWeights Restored from Lowest val_loss epoch: {lowest_val_loss_epoch}\nlowest_val_loss: {lowest_val_loss}")
                     STOP = True
                 else:
                     patience_counter += 1
 
-    def evaluate(self, test_dataloader, task_type="Survival", checkpoint=None, device="cuda", best=False, path="", kfold=""):
+        if self.config.model.save_checkpoints:
+            torch.save(model_last_epoch, checkpoint_last_epoch)
+        
+            if eval_dataloader is not None:
+                for checkpoint, model in zip([checkpoint_model_lowest_loss, checkpoint_model_highest_metric], [model_lowest_loss, model_highest_metric]):
+                    if kfold != "":
+                        checkpoint_splitted = checkpoint.split(".")
+                        checkpoint = f"{checkpoint_splitted[0]}{df_fold_suffix}.pt"
+                    torch.save(model, checkpoint)
+
+    def evaluate(self, test_dataloader, 
+                task_type="Survival", 
+                checkpoint_last_epoch='{path}/model_last_epoch.pt',
+                checkpoint_model_lowest_loss = '{path}/model_lowest_loss.pt', 
+                checkpoint_model_highest_metric = '{path}/model_highest_metric.pt',
+                device="cuda", 
+                best=False, 
+                path="", 
+                kfold="",
+                log_aggregated=False):
         cudnn.benchmark = False
         logging.info("test")   
         df_fold_suffix = f"_{kfold}"
         log_fold_string = f"/{kfold}"     
+        models = []
+        summary_paths = []
+        h5_prefixes = []
+        csv_prefixes = []
+        
         if best:
             if kfold != "":
-                checkpoint_splitted = checkpoint.split(".")
-                checkpoint = f"{checkpoint_splitted[0]}{df_fold_suffix}.pt"
-            net = torch.load(checkpoint)
+                checkpoint_splitted_last = checkpoint_last_epoch.split(".")
+                checkpoint_last_epoch = f"{checkpoint_splitted_last[0]}{df_fold_suffix}.pt"
+
+                checkpoint_splitted_lowest_l = checkpoint_model_lowest_loss.split(".")
+                checkpoint_lowest_l = f"{checkpoint_splitted_lowest_l[0]}{df_fold_suffix}.pt"
+
+                model_lowest_l = torch.load(checkpoint_lowest_l, weights_only=False)
+                models.append(model_lowest_l)
+                summary_paths.append('Lowest_Validation_Loss_Model/Test')
+                h5_prefixes.append('lowest_val_loss_test_df')
+                csv_prefixes.append('lowest_val_loss_test_metrics')
+
+                checkpoint_splitted_highest_m = checkpoint_model_highest_metric.split(".")
+                checkpoint_highest_m = f"{checkpoint_splitted_highest_m[0]}{df_fold_suffix}.pt"
+
+                model_highest_m = torch.load(checkpoint_highest_m, weights_only=False)
+                models.append(model_highest_m)
+                summary_paths.append('Highest_Validation_Metric_Model/Test')
+                h5_prefixes.append('highest_val_metric_test_df')
+                csv_prefixes.append('highest_val_metric_test_metrics')
+                
+
+                
+            last_model = torch.load(checkpoint_last_epoch, weights_only=False)
             logging.info("\n Evalate best model")
         else:
-            net = self.net
+            last_model = self.net
             logging.info("\n Evalate last model")
 
-        net = net.to(device)
-        net.eval()
-        tloss = []
-        tlossWeights = []
-        with torch.inference_mode():
-            for idx, batch  in enumerate(test_dataloader):
-                if idx == 0:
-                        log_dict = self.initialize_metrics_dict(task_type)
-                # batch_data = torch.squeeze(batch_data, 0)
-                step_result = self.step(batch, log_dict, task_type, device)
-                
-                outputs = step_result['outputs'] 
-                labels = step_result['labels'] 
-                censorships = step_result['censorships'] 
-                log_dict = step_result['log_dict']
+        models.append(last_model)
+        summary_paths.append('Last_Epoch_Model/Test')
+        h5_prefixes.append('last_epoch_test_df')
+        csv_prefixes.append('last_epoch_test_metrics')
+
+        for model, summary_path, h5_prefixe, csv_prefixe in zip(models, summary_paths, h5_prefixes, csv_prefixes):
+            model = model.to(device)
+            model.eval()
+            tloss = []
+            tlossWeights = []
+            with torch.inference_mode():
+                for idx, batch  in enumerate(test_dataloader):
+                    if idx == 0:
+                            log_dict = self.initialize_metrics_dict(task_type)
+                    # batch_data = torch.squeeze(batch_data, 0)
+                    step_result = self.step(batch, log_dict, task_type, device, model)
+                    
+                    outputs = step_result['outputs'] 
+                    labels = step_result['labels'] 
+                    censorships = step_result['censorships'] 
+                    log_dict = step_result['log_dict']
 
 
-                if task_type == "Survival":
-                    loss = self.loss_function(outputs, labels, None, censorships)
-                elif task_type == "Treatment_Response":
-                    loss = self.loss_function(outputs, labels.squeeze(1))
-                else:
+                    if task_type == "Survival":
+                        loss = self.loss_function(outputs, labels, None, censorships)
+                    elif task_type == "Treatment_Response":
+                        loss = self.loss_function(outputs, labels.squeeze(1))
+                    else:
                         raise Exception(f"{task_type} is not supported!")
 
-                if self.config.data_loader.batch_size <= self.config.data_loader.real_batch_size:
-                    tloss.append(loss.item())
-                else:
-                    tloss.append(loss.detach().mean().item())
-                tlossWeights.append(batch["label"].size(dim=0))
+                    if self.config.data_loader.batch_size <= self.config.data_loader.real_batch_size:
+                        tloss.append(loss.item())
+                    else:
+                        tloss.append(loss.detach().mean().item())
+                    tlossWeights.append(batch["label"].size(dim=0))
 
-        tloss = np.array(tloss)
-        tloss = np.average(tloss, weights=tlossWeights)
-        test_df = pd.DataFrame(log_dict)
-        test_metrics_dict = self.compute_metrics_df(test_df, task_type)
+            tloss = np.array(tloss)
+            tloss = np.average(tloss, weights=tlossWeights)
+            test_df = pd.DataFrame(log_dict)
+            test_metrics_dict = self.compute_metrics_df(test_df, task_type)
 
-        if best:
-            # wandb.run.summary["Lowest_Validation_Loss/Test_Loss"] = tloss
-            # wandb.run.summary["Lowest_Validation_Loss/Test_c-index"] = test_metrics_dict["c-index"]
             for key, value in test_metrics_dict.items():
-                    wandb.run.summary[f"Lowest_Validation_Loss/Test{log_fold_string}/{key}"] = value
-            test_df.to_hdf(f"{path}/best_test_df{df_fold_suffix}.h5", key="df", mode="w")
-            test_metrics_df = pd.DataFrame(test_metrics_dict, index=[0])
-            test_metrics_df.to_csv(f"{path}/best_test_metrics{df_fold_suffix}.csv")
-            if task_type == "Treatment_Response":
-                test_confusion_matrix = accuracy_confusionMatrix_plot(log_dict, test_metrics_df)
-        else:
-            for key, value in test_metrics_dict.items():
-                    wandb.run.summary[f"Last_Epoch_Model/Test{log_fold_string}/{key}"] = value
-            test_df.to_hdf(f"{path}/last_epoch_test_df{df_fold_suffix}.h5", key="df", mode="w")
-            test_metrics_df = pd.DataFrame(test_metrics_dict, index=[0])
-            test_metrics_df.to_csv(f"{path}/last_epoch_test_metrics{df_fold_suffix}.csv")
-            if task_type == "Treatment_Response":
-                test_confusion_matrix = accuracy_confusionMatrix_plot(log_dict, test_metrics_df)
+                wandb.run.summary[f"{summary_path}{log_fold_string}/{key}"] = value
 
-    def log_aggregated(self, result_id_path):
-        out = kfold_results_merge(result_id_path)
-        to_log = {
-         "Last_Epoch_Model/Test/Aggregated/AUC": out['AUC'],
-         "Last_Epoch_Model/Test/Aggregated/Accuracy": out['Accuracy'],
-         "Last_Epoch_Model/Test/Aggregated/F1-Score": out['F1-Score'],
-         "Last_Epoch_Model/Test/Aggregated/Confusion_Matrix": wandb.Image(out['Confusion_Matrix']),
-         }
-        wandb.log(to_log)
+            test_df.to_hdf(f"{path}/{h5_prefixe}{df_fold_suffix}.h5", key="df", mode="w")
+            test_metrics_df = pd.DataFrame(test_metrics_dict, index=[0])
+            test_metrics_df.to_csv(f"{path}/{csv_prefixe}{df_fold_suffix}.csv")
+
+        if log_aggregated:
+            self.log_aggregated(path, summary_paths, h5_prefixes, task_type)
+
+
+    def log_aggregated(self, result_path, summary_paths, h5_prefixes, task_type="Survival"):
+        for summary_path, h5_prefix in zip(summary_paths, h5_prefixes):
+            # prefix = 'last_epoch_test_df_Fold_'
+            prefix = h5_prefix
+            out = kfold_results_merge(result_path, prefix, task_type)
+
+            if task_type == "Survival":
+                to_log = {
+                    f"{summary_path}/Aggregated/c-index": out['c-index'],
+                    f"{summary_path}/Aggregated/c-index_std": out['c-index_std'],
+                    f"{summary_path}/Aggregated/c-index_mean": out['c-index_mean'],
+                }
+                # add KM plot
+            elif task_type == "Treatment_Response":
+                to_log = {
+                f"{summary_path}/Aggregated/AUC": out['AUC'],
+                f"{summary_path}/Aggregated/Accuracy": out['Accuracy'],
+                f"{summary_path}/Aggregated/F1-Score": out['F1-Score'],
+                
+                f"{summary_path}/Aggregated/AUC_std": out['AUC_std'],
+                f"{summary_path}/Aggregated/Accuracy_std": out['Accuracy_std'],
+                f"{summary_path}/Aggregated/F1-Score_std": out['F1-Score_std'],
+                
+                f"{summary_path}/Aggregated/AUC_mean": out['AUC_mean'],
+                f"{summary_path}/Aggregated/Accuracy_mean": out['Accuracy_mean'],
+                f"{summary_path}/Aggregated/F1-Score_mean": out['F1-Score_mean']
+                }
+
+                if 'Confusion_Matrix' in out:
+                    to_log[f"{summary_path}/Aggregated/Confusion_Matrix"] = wandb.Image(out['Confusion_Matrix'])
+
+            wandb.log(to_log)
 

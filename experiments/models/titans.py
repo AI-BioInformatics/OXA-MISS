@@ -29,13 +29,14 @@ class TITANS(nn.Module):
             "num_longterm_mem_tokens": kwargs.get("num_longterm_mem_tokens", 16),  # num_longterm_mem_tokens
             "neural_memory_layers": kwargs.get("neural_memory_layers", (2,)),  # neural_memory_layers
             "neural_memory_segment_len": kwargs.get("neural_memory_segment_len", 16),  # neural_memory_segment_len
-            "neural_memory_batch_size": kwargs.get("neural_memory_batch_size", 128),  # neural_memory_batch_size
+            "neural_memory_batch_size": kwargs.get("neural_memory_batch_size",512), #128 as default  # neural_memory_batch_size
             "neural_mem_gate_attn_output": kwargs.get("neural_mem_gate_attn_output", False),  # neural_mem_gate_attn_output
             "neural_mem_weight_residual": kwargs.get("neural_mem_weight_residual", True),  # neural_mem_weight_residual
             "use_flex_attn": kwargs.get("use_flex_attn", False),  # use_flex_attn
             "sliding_window_attn": kwargs.get("sliding_window_attn", False),  # sliding_window_attn
             "output_classes": output_dim,  # output_dim
-            "neural_memory_kwargs": kwargs.get("default_step_transform_max_lr", {"default_step_transform_max_lr": 0.001}),  # default_step_transform_max_lr
+            "num_residual_streams": kwargs.get("num_residual_streams", 1),  # num_residual_streams 4
+            "neural_memory_kwargs": kwargs.get("default_step_transform_max_lr", {"default_step_transform_max_lr": 0.1}),  # default_step_transform_max_lr
             # "neural_memory_kwargs": kwargs.get("max_grad_norm", {"max_grad_norm":0.1}),  # max_grad_norm
             # "neural_memory_kwargs": kwargs.get("momentum", {"momentum":False}),  # momentum
         }
@@ -49,10 +50,5 @@ class TITANS(nn.Module):
         x = x[~mask.bool()].unsqueeze(0)
         x = self.inner_proj(x)
         x=self.mil_mac(x) #[:,:64,:] [:,:1024,:]
-        # for emb in range(x.shape[2]):
-        #     x_emb=x[:,:,emb]
-        #     x_emb=self.mil_mac(x_emb)
-        #     tmp_output.append(x_emb.unsqueeze(-1))
-        # x=torch.cat(tmp_output, dim=-1)
         output = {'output': x}
         return output

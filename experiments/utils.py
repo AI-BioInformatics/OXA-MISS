@@ -10,6 +10,10 @@ from sklearn.metrics import confusion_matrix
 from sklearn.metrics import roc_auc_score, confusion_matrix,f1_score
 from sksurv.metrics import concordance_index_censored
 
+import importlib.util
+import sys
+from pathlib import Path
+
 
 def move_to_device(data, device):
     if isinstance(data, dict):
@@ -24,6 +28,41 @@ def move_to_device(data, device):
     else:
         # If not a tensor or a collection, return the value as is
         return data 
+
+def import_class_from_path(import_path, model_name, **kwargs):
+        # model_name = self.config.model.name
+        try:
+            # import_path = f"/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/experiments/models/{model_name}.py"
+            # ModelClass = import_class_from_path(import_path, model_name)
+
+            import_path = Path(import_path).resolve()  # Risolve il percorso assoluto
+            module_name = import_path.stem  # Ottiene il nome del modulo dal file
+
+            spec = importlib.util.spec_from_file_location(module_name, str(import_path))
+            if spec and spec.loader:
+                module = importlib.util.module_from_spec(spec)
+                sys.modules[module_name] = module
+                spec.loader.exec_module(module)
+                ModelClass = getattr(module, model_name)  # Restituisce la classe
+            else:
+                raise ImportError(f"Impossibile importare il modulo da {import_path}")
+            return ModelClass#(**kwargs)
+        except (ModuleNotFoundError, AttributeError) as e:
+            raise ValueError(f"Error importing {model_name} class from {import_path}")
+
+
+# def import_class_from_path(import_path, class_name):
+#     import_path = Path(import_path).resolve()  # Risolve il percorso assoluto
+#     module_name = import_path.stem  # Ottiene il nome del modulo dal file
+
+#     spec = importlib.util.spec_from_file_location(module_name, str(import_path))
+#     if spec and spec.loader:
+#         module = importlib.util.module_from_spec(spec)
+#         sys.modules[module_name] = module
+#         spec.loader.exec_module(module)
+#         return getattr(module, class_name)  # Restituisce la classe
+#     else:
+#         raise ImportError(f"Impossibile importare il modulo da {import_path}")
 
 
 def KaplanMeier_plot(log_dict):
@@ -121,7 +160,7 @@ def accuracy_confusionMatrix_plot(log_dict, metrics_df):
     return image
 
 def kfold_results_merge(result_id_path, prefix='last_epoch_test_df_Fold_', task_type='Survival'):
-    # folder = f"/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/results/{result_id}"
+    
     folder = result_id_path
     paths = [
         os.path.join(result_id_path,f)
@@ -135,17 +174,16 @@ def kfold_results_merge(result_id_path, prefix='last_epoch_test_df_Fold_', task_
     if len(dfs):
         is_loo_case = len(dfs[0]) == 1
     
-    df = pd.concat(dfs)
-    
-    if task_type == 'Survival':
+    df_tot = pd.concat(dfs)
+
+    def survival_results_merge(df):
         all_risk_scores = df["all_risk_scores"].values
         all_censorships = df["all_censorships"].values
         all_event_times = df["all_event_times"].values
-        c_index = concordance_index_censored((1-all_censorships).astype(bool), all_event_times, all_risk_scores, tied_tol=1e-08)[0]        
-        out = {"c-index": c_index}
-
-
-    elif task_type == 'Treatment_Response':
+        c_index = concordance_index_censored((1-all_censorships).astype(bool), all_event_times, all_risk_scores, tied_tol=1e-08)[0] 
+        return {"c-index": c_index}
+    
+    def treatment_response_results_merge(df):
         all_labels = df["all_labels"].values
         all_predictions = df["treatment_response_predictions"].values
         all_logits = torch.tensor(df["treatment_response_logits"].tolist())
@@ -154,19 +192,46 @@ def kfold_results_merge(result_id_path, prefix='last_epoch_test_df_Fold_', task_
         auc = roc_auc_score(all_labels, logits_for_auc)    
         f1 = f1_score(all_labels, all_predictions, average='macro')
         accuracy = np.mean(all_labels == all_predictions) 
-        metrics_df = pd.DataFrame({"AUC": [auc], "F1-Score": [f1], "Accuracy": [accuracy]})
-        
-        log_dict = {"all_labels": all_labels, "treatment_response_predictions": all_predictions}
-        image =  accuracy_confusionMatrix_plot(log_dict, metrics_df)
-    
+  
         out = {
             "AUC" : auc,
             "Accuracy" : accuracy,
             "F1-Score" : f1
         }
     
-    if not is_loo_case:
-        out["Confusion_Matrix"] = image
+        if not is_loo_case:
+            metrics_df = pd.DataFrame({"AUC": [auc], "F1-Score": [f1], "Accuracy": [accuracy]})
+            log_dict = {"all_labels": all_labels, "treatment_response_predictions": all_predictions}
+            image =  accuracy_confusionMatrix_plot(log_dict, metrics_df)
+            out["Confusion_Matrix"] = image
+        return out
+    
+    results_merge_function_dict = {
+        'Survival': survival_results_merge,
+        'Treatment_Response': treatment_response_results_merge
+    }
+    
+    results_merge_function = results_merge_function_dict[task_type]
+    
+    out = results_merge_function(df_tot)
+    if len(dfs) > 1:
+
+        folds_out = {}
+        for key in out: folds_out[key] = []
+        for df_fold in dfs:
+            fold_out = results_merge_function(df_fold)
+            for key in fold_out:
+                folds_out[key].append(fold_out[key])
+
+        std_out = {}
+        mean_out = {}
+        for key in out:
+            if isinstance(out[key], int) or isinstance(out[key], float):
+                std_out[f'{key}_std'] = np.std(folds_out[key])
+                mean_out[f'{key}_mean'] = np.mean(folds_out[key])
+        out.update(std_out)
+        out.update(mean_out)
+
     return out
 
 def predTime_vs_actualTime_confusionMatrix_plot(self, log_dict):

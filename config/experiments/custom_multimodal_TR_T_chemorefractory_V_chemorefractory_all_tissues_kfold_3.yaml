@@ -6,6 +6,8 @@ wandb:
   mode: online
 
 data_loader:
+  file_genes_group: "/work/H2020DeciderFicarra/D2_4/datasets/DECIDER_cohorts/Gene_expression/Expression/daria_mapped_all_genes.json"
+  # file_genes_group: "/work/H2020DeciderFicarra/D2_4/datasets/DECIDER_cohorts/Gene_expression/Expression/daria_mapped.json"
   datasets_configs: ["/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/config/datasets/Decider_dataset_TR_chemorefractory_all_tissues.yaml"]
   task_type: "Treatment_Response"
   max_patches: 4096
@@ -32,18 +34,22 @@ data_loader:
 model:
   name: Custom_Multimodal
   pretrained: False # False # True
+  save_checkpoints: True
   kwargs:
     input_dim: 1024
-    genomics_input_dim: 25 # 20361 # 90
-    genomics_dropout: 0.0
-    cnv_input_dim: 25 # 20361 # 90
-    cnv_dropout: 0.0
+    genomics_group_name : ["all_genes"] # ["high_refractory", "high_sensitive", "hypoxia_pathway"]
+    genomics_group_input_dim : [82] # [25, 35, 31]
+    genomics_group_dropout : [0.2]  # [0.2, 0.2, 0.2]
+    cnv_group_name : ["all_genes"]  # ["high_refractory", "high_sensitive", "hypoxia_pathway"]
+    cnv_group_input_dim : [82] # [25, 35, 31]
+    cnv_group_dropout : [0.2]  # [0.2, 0.2, 0.2]
     inner_dim: 64
     num_latent_queries: 1
+    wsi_dropout: 0.0
     use_layernorm: False
-    dropout: 0.2
+    dropout: 0.0 # 0.5
     output_dim: 2
-    input_modalities: ["WSI", "Genomics", "CNV"] # ["WSI", "Genomics", "CNV"]
+    input_modalities: ["WSI"]
   device: cuda
 
 loss:
@@ -74,6 +80,6 @@ trainer:
   do_test: False
   do_inference: False
   do_kfold: True
-  epochs: 20
+  epochs: 2
   patience: 7
   AEM_lamda: 0

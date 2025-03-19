@@ -18,8 +18,8 @@ from hashlib import shake_256
 from munch import munchify, unmunchify
 import wandb
 from torch.utils.data import Dataset, DataLoader, Subset, SequentialSampler, SubsetRandomSampler
-from experiments.model_manager import ModelManager
-from dataloader.dataloader_multidataset import Multimodal_Bio_Dataset
+from experiments.model_manager_dev import ModelManager
+from dataloader.dataloader_multidataset_dev import Multimodal_Bio_Dataset
 from dataloader.dataloader_utils import get_dataloaders
 from experiments.utils import import_class_from_path
 import gc
@@ -28,6 +28,7 @@ os.environ["TORCH_USE_CUDA_DSA"] = "1"
 print("CUDA Device Count:", torch.cuda.device_count())
 print("PyTorch CUDA Version:", torch.version.cuda)
 print("CUDA Available:", torch.cuda.is_available())
+
 
 # used to generate random names that will be appended to the
 # experiment name
@@ -38,14 +39,6 @@ def timehash():
     h = h.hexdigest(5)  # output len: 2*5=10
     return h.upper()
 
-def repair_config(config, seed):
-    if seed is not None:
-        config.seed = seed
-    if not hasattr(config.trainer, 'Save_XA_attention_files'):
-        config.trainer.Save_XA_attention_files = False
-    if not hasattr(config.model.kwargs, 'use_WSI_level_embs'):
-        config.model.kwargs.use_WSI_level_embs = False
-    return config
 
 def setup(seed):
     os.environ['PYTHONHASHSEED'] = str(seed)
@@ -57,6 +50,7 @@ def setup(seed):
     torch.backends.cudnn.benchmark = False
     torch.backends.cudnn.deterministic = True
     # Ensure that you have not set torch.backends.cudnn.enabled = False
+
 
 if __name__ == "__main__":
     wandb.require("core")
@@ -89,7 +83,8 @@ if __name__ == "__main__":
     import_path = f"/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/experiments/models/{config.model.name}.py"
     ModelClass = import_class_from_path(import_path, config.model.name)
 
-    config = repair_config(config, args.seed)
+    if args.seed != None:
+        config.seed = args.seed
 
     for k, v in config.items():
         pad = ' '.join(['' for _ in range(25-len(k))])
@@ -102,6 +97,18 @@ if __name__ == "__main__":
 
     if args.debug:
         os.environ['WANDB_DISABLED'] = 'true'
+
+
+    wandb_name = f"{config.title}"
+    # start wandb
+    wandb.init(
+        project="multimodal_decider",
+        entity="multimodal_decider",
+        name=wandb_name,
+        config=unmunchify(config),
+        mode=config.wandb.mode,
+        settings=wandb.Settings(_service_wait=900)
+    )
 
     # Check if project_dir exists
     if not os.path.exists(config.project_dir):
@@ -157,22 +164,11 @@ if __name__ == "__main__":
 
     # Copy config file to project_dir, to be able to reproduce the experiment
     copy_config_path = os.path.join(parent_directory, 'config.yaml')
-    # shutil.copy(args.config, copy_config_path)
-    # # Dump the modified config to the copied config file
-    with open(copy_config_path, 'w') as config_file:
-        yaml.dump(unmunchify(config), config_file, default_flow_style=False, sort_keys=True)
+    shutil.copy(args.config, copy_config_path)
 
-    wandb_name = f"{config.title}"
-    # start wandb
-    wandb.init(
-        project="multimodal_decider",
-        entity="multimodal_decider",
-        name=wandb_name,
-        config=unmunchify(config),
-        mode=config.wandb.mode,
-        settings=wandb.Settings(_service_wait=900)
-    )
-
+    
+    # transf_train = create_transforms(preprocessing, augmentation, config, eval=False, compose=True)
+    # transf_eval = create_transforms(preprocessing, augmentation, config, eval=True, compose=True)
     # THE FOLLOWING TRANSFORMATIONS MUST BE CREATED ACCORDINGLY TO THE DATALOADER/TRANSFORMS.PY, PREPROCESSING, AUGMENTATIONS AND CONFIG(DATALOADER.NORMALIZE) YAML FILES
     # THE FOLLOWING IS A TOY DATASET 
     # MOST OF THE FOLLOWING INSTRUCTIONS MUST BE WRAPPED IN A DATALOADER CLASS
@@ -187,6 +183,7 @@ if __name__ == "__main__":
                             sample=config.data_loader.sample,
                             load_slides_in_RAM=config.data_loader.load_slides_in_RAM,
                             file_genes_group=config.data_loader.file_genes_group,
+                            use_WSI_level_embs=config.model.kwargs.use_WSI_level_embs
                         )
     # GET INDICES FOR TRAIN, VALIDATION, AND TEST SETS
     train_patients, val_patients, test_patients = dataset.get_train_test_val_splits(
@@ -195,6 +192,18 @@ if __name__ == "__main__":
                                                                                 test_size=config.data_loader.test_size, 
                                                                                 random_state=config.data_loader.random_state
                                                                                 )
+    
+    if hasattr(config.data_loader, 'bad_patients') and config.data_loader.bad_patients and config.model.kwargs.use_WSI_level_embs:
+        if train_patients is not None:
+            train_patients = np.delete(train_patients, np.isin(train_patients, config.data_loader.bad_patients))
+
+        if val_patients is not None:
+            val_patients = np.delete(val_patients, np.isin(val_patients, config.data_loader.bad_patients))
+
+        if test_patients is not None:
+            test_patients = np.delete(test_patients, np.isin(test_patients, config.data_loader.bad_patients))
+    
+    
     if "Genomics" in config.model.kwargs.input_modalities:
         dataset.normalize_genomics(train_patients, val_patients, test_patients)
     if "CNV" in config.model.kwargs.input_modalities:
@@ -207,6 +216,7 @@ if __name__ == "__main__":
                                                                         config=config
                                                                         )
 
+    
     if config.scheduler.name=="OneCycleLR":
         steps_per_epoch  = len(train_dataloader)
         config.scheduler["steps_per_epoch"]=steps_per_epoch
@@ -238,8 +248,7 @@ if __name__ == "__main__":
                     checkpoint=checkpoint_last_epoch, 
                     best=True, 
                     device=config.model.device, 
-                    path=f"{parent_directory}",
-                    Save_XA_attention_files = config.trainer.Save_XA_attention_files)
+                    path=f"{parent_directory}")
 
     # Test the model
     if config.trainer.do_test:
@@ -249,8 +258,7 @@ if __name__ == "__main__":
                     checkpoint=config.trainer.checkpoint, 
                     best=True, 
                     device=config.model.device, 
-                    path=f"{parent_directory}",
-                    Save_XA_attention_files = config.trainer.Save_XA_attention_files)
+                    path=f"{parent_directory}")
 
     # Test the model
     if config.trainer.do_inference:
@@ -259,8 +267,7 @@ if __name__ == "__main__":
                     task_type=config.data_loader.task_type, 
                     checkpoint=config.trainer.checkpoint, 
                     device=config.model.device, 
-                    path=f"{parent_directory}",
-                    Save_XA_attention_files = config.trainer.Save_XA_attention_files)
+                    path=f"{parent_directory}")
 
     if config.trainer.do_kfold:
         logging.info('K-Fold...')
@@ -301,6 +308,17 @@ if __name__ == "__main__":
             # MODIFICATO:
             test_patients = split_df["val"].dropna().values.astype(str)
             # test_patients = split_df["test"].dropna().values.astype(str)
+
+            if hasattr(config.data_loader, 'bad_patients') and config.data_loader.bad_patients and config.model.kwargs.use_WSI_level_embs:
+                if train_patients is not None:
+                    train_patients = np.delete(train_patients, np.isin(train_patients, config.data_loader.bad_patients))
+
+                if val_patients is not None:
+                    val_patients = np.delete(val_patients, np.isin(val_patients, config.data_loader.bad_patients))
+
+                if test_patients is not None:
+                    test_patients = np.delete(test_patients, np.isin(test_patients, config.data_loader.bad_patients))
+
             if "Genomics" in config.model.kwargs.input_modalities:
                 dataset.normalize_genomics(train_patients, val_patients, test_patients)
             if "CNV" in config.model.kwargs.input_modalities:
@@ -350,8 +368,7 @@ if __name__ == "__main__":
                         device=config.model.device, 
                         path=f"{parent_directory}", 
                         kfold=foldname,
-                        log_aggregated = i==len(splits)-1,
-                        Save_XA_attention_files = config.trainer.Save_XA_attention_files)
+                        log_aggregated = i==len(splits)-1)
             
         # mm.log_aggregated(parent_directory)
 

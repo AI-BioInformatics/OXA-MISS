@@ -1,4 +1,4 @@
-title: custom_multimodal_Treatment_Response_T_PTRC-HGSOC_chemorefractory_OBR_expandedv2_V_chemorefractory_kfold_5_all_tissues
+title: custom_multimodal_XA_Treatment_Response_T_PTRC-HGSOC_chemorefractory_OBR_expandedv2_V_chemorefractory_kfold_5_all_tissues
 project_dir: '/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/results'
 seed: 42
 
@@ -9,9 +9,6 @@ data_loader:
   # file_genes_group: "/work/H2020DeciderFicarra/D2_4/datasets/DECIDER_cohorts/Gene_expression/Expression/daria_mapped_all_genes.json"
   file_genes_group: "/work/H2020DeciderFicarra/D2_4/datasets/DECIDER_cohorts/Gene_expression/Expression/daria_mapped.json"
   datasets_configs: ["/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/config/datasets/Decider_dataset_TR_chemorefractory_all_tissues.yaml","/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/config/datasets/TR_PTRC-HGSOC_all_tissues.yaml","/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/config/datasets/TR_OBR_expandedv2_all_tissues.yaml"]
-  
-  bad_patients: ['8005']
-  
   task_type: "Treatment_Response"
   max_patches: 4096
   batch_size: 1
@@ -23,7 +20,7 @@ data_loader:
   label_name: "Treatment_Response"
   censorships_name: "None"
   eps: 0.000001
-  num_workers: 4
+  num_workers: 2
   train_size: 0.7
   val_size: 0.15
   test_size: 0.15
@@ -32,33 +29,33 @@ data_loader:
   augmentation: /work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/config/augmentation.yaml
   KFold:
     splits: /work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/splits/Treatment_Response/T_PTRC-HGSOC_chemorefractory_OBR_expandedv2_V_chemorefractory/k_5/all_tissues # /work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/splits/k_5/Treatment_Response/chemorefractory/all_tissues
-    internal_val_size: 0
+    internal_val_size: 0.0
 
 model:
-  name: Custom_Multimodal_Dev
+  name: Custom_Multimodal_XA
   pretrained: False # False # True
   save_checkpoints: True
   kwargs:
     input_dim: 1024
-    genomics_group_name : ["high_refractory", "high_sensitive", "hypoxia_pathway"] # ["high_refractory", "high_sensitive", "hypoxia_pathway"] ["all_genes"]
-    genomics_group_input_dim : [25, 35, 31] # [25, 35, 31]  [82]
-    genomics_group_dropout : [0.2, 0.2, 0.2]  # [0.2, 0.2, 0.2]
-    cnv_group_name : ["all_genes"]  # ["high_refractory", "high_sensitive", "hypoxia_pathway"]
-    cnv_group_input_dim : [82] # [25, 35, 31]
-    cnv_group_dropout : [0.2]  # [0.2, 0.2, 0.2]
+    genomics_group_name: ["high_refractory", "high_sensitive", "hypoxia_pathway"] # ["all_genes"] # ["high_refractory", "high_sensitive", "hypoxia_pathway"]
+    genomics_group_input_dim: [25, 35, 31] # [82] # [25, 35, 31]
+    genomics_group_dropout: [0.2, 0.2, 0.2] # [0.2]  # [0.2, 0.2, 0.2]
+    cnv_group_name: ["high_refractory", "high_sensitive", "hypoxia_pathway"] # ["all_genes"]  # ["high_refractory", "high_sensitive", "hypoxia_pathway"]
+    cnv_group_input_dim: [25, 35, 31] # [82] # [25, 35, 31]
+    cnv_group_dropout: [0.2, 0.2, 0.2] # [0.2]  # [0.2, 0.2, 0.2]
     inner_dim: 64
     num_latent_queries: 1
     wsi_dropout: 0.0
     use_layernorm: False
-    dropout: 0.5 
+    dropout: 0.25 # 0.5
     output_dim: 2
     input_modalities: ["WSI", "Genomics"] # ["WSI", "Genomics", "CNV"]
 
     use_WSI_level_embs: False # False True 
     WSI_level_embs_fusion_type: "concat" # sum | concat
-    WSI_level_encoder_dropout: 0
-    WSI_level_encoder_sizes: [768, 20, 3]
-    WSI_level_encoder_LayerNorm: False
+    WSI_level_encoder_dropout: 0.3
+    WSI_level_encoder_sizes: [768, 60, 10]
+    WSI_level_encoder_LayerNorm: True
   device: cuda
 
 loss:
@@ -92,3 +89,4 @@ trainer:
   epochs: 20
   patience: 7
   AEM_lamda: 0.3
+  Save_XA_attention_files: True

@@ -3,8 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 from nystrom_attention import NystromAttention
-from models.utils.basemodel import Baseline
-from utilsmil4wsi.utils2 import dropout_node
+
 
 class TransLayer(nn.Module):
 
@@ -21,8 +20,8 @@ class TransLayer(nn.Module):
             dropout=0.1
         )
 
-    def forward(self, x):
-        x = x + self.attn(self.norm(x))
+    def forward(self, x, mask):
+        x = x + self.attn(self.norm(x), mask)
 
         return x
 
@@ -44,62 +43,74 @@ class PPEG(nn.Module):
         return x
 
 
-class TransMIL(Baseline):
-    def __init__(self,args,state_dict_weights,n_classes=1):
-        super(TransMIL, self).__init__(args,state_dict_weights)
-        self.pos_layer = PPEG(dim=192)
-        self._fc1 = nn.Sequential(nn.Linear(384, 192), nn.ReLU())
-        self.cls_token = nn.Parameter(torch.randn(1, 1, 192))
-        self.n_classes = n_classes
-        self.layer1 = TransLayer(dim=192)
-        self.layer2 = TransLayer(dim=192)
-        self.norm = nn.LayerNorm(192)
-        self._fc2 = nn.Linear(192, self.n_classes)
+class TransMIL(nn.Module):
+    def __init__(self,
+                 input_dim=1024,
+                 d_model=512,
+                 output_dim=4):
+        super(TransMIL, self).__init__()
+        self.pos_layer = PPEG(dim=d_model)
+        self._fc1 = nn.Sequential(nn.Linear(input_dim, d_model), nn.ReLU())
+        self.cls_token = nn.Parameter(torch.randn(1, 1, d_model))
+        self.output_dim = output_dim
+        self.layer1 = TransLayer(dim=d_model)
+        self.layer2 = TransLayer(dim=d_model)
+        self.norm = nn.LayerNorm(d_model)
+        self._fc2 = nn.Linear(d_model, self.output_dim)
+
+        
+        cls_mask = torch.zeros([1,1])
+        self.register_buffer("cls_mask", cls_mask)
 
 
-    def forward(self,  h, edge_index,level,childof,edge_index2,edge_index3,**kwargs):
 
-        result={}
-        #edge_index, edge_mask, edge_node= dropout_node(edge_index=edge_index,p=0.4)
-        #h=h[edge_node]
-        #h = kwargs['data'].float() #[B, n, 1024]
-        h=h[None,:,:]
+    def forward(self, data):
+
+        h = data['patch_features']
+        mask = data['mask']
+        # h = h[~mask.bool()].unsqueeze(0)
+
         h = self._fc1(h) #[B, n, 512]
-
+        
         #---->pad
         H = h.shape[1]
         _H, _W = int(np.ceil(np.sqrt(H))), int(np.ceil(np.sqrt(H)))
         add_length = _H * _W - H
         h = torch.cat([h, h[:,:add_length,:]],dim = 1) #[B, N, 512]
+        mask = torch.cat([mask, mask[:,:add_length]],dim = 1)
 
         #---->cls_token
         B = h.shape[0]
-        cls_tokens = self.cls_token.expand(B, -1, -1).cuda()
+        cls_tokens = self.cls_token.expand(B, -1, -1)
         h = torch.cat((cls_tokens, h), dim=1)
 
         #---->Translayer x1
-        h = self.layer1(h) #[B, N, 512]
+        mask = torch.cat([self.cls_mask, mask], dim=-1)
+        mask = 1-mask
+        mask = mask.bool()
+        
+        h = self.layer1(h, mask = mask) #[B, N, 512]
 
         #---->PPEG
         h = self.pos_layer(h, _H, _W) #[B, N, 512]
-
+        
         #---->Translayer x2
-        h = self.layer2(h) #[B, N, 512]
+        h = self.layer2(h, mask = mask) #[B, N, 512]
 
         #---->cls_token
         h = self.norm(h)[:,0]
 
         #---->predict
         logits = self._fc2(h) #[B, n_classes]
-        Y_hat = torch.argmax(logits, dim=1)
-        Y_prob = F.softmax(logits, dim = 1)
-        #results_dict = {'logits': logits, 'Y_prob': Y_prob, 'Y_hat': Y_hat}
-        result["higher"]= logits,logits, h,logits
-        return result
+        # Y_hat = torch.argmax(logits, dim=1)
+        # Y_prob = F.softmax(logits, dim = 1)
+        # results_dict = {'logits': logits, 'Y_prob': Y_prob, 'Y_hat': Y_hat}
+        # return results_dict
+        return {'output':logits}
 
 if __name__ == "__main__":
     data = torch.randn((1, 6000, 1024)).cuda()
-    model = TransMIL(n_classes=2).cuda()
+    model = TransMIL(output_dim=2).cuda()
     print(model.eval())
     results_dict = model(data = data)
     print(results_dict)

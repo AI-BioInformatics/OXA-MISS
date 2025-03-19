@@ -7,7 +7,6 @@ from torch.backends import cudnn
 import torch.nn.functional as F
 import wandb
 import logging
-from .models import * 
 from scipy import stats
 import math
 from .loss.loss_func import NLLSurvLoss
@@ -21,22 +20,25 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import io, copy
 from PIL import Image
-from .utils import accuracy_confusionMatrix_plot, kfold_results_merge, move_to_device
+from .utils import accuracy_confusionMatrix_plot, kfold_results_merge, move_to_device, import_class_from_path
+import os
 # from .metrics.loss_func import NLLSurvLoss
 # from .scheduler import *
 from adam_atan2_pytorch import AdoptAtan2
-DEBUG_BATCHES = 64
+DEBUG_BATCHES = 8
 
 class ModelManager():
     def __init__(self,
-                 config
+                 config, 
+                 ModelClass
                  ):
         self.config = config
         self.device = config.model.device
         self.real_batch_size = config.data_loader.real_batch_size
         self.NUM_ACCUMULATION_STEPS = self.real_batch_size//config.data_loader.batch_size
-
-        self.net = self.__build__()
+        self.attention_dir_check = False
+        
+        self.net = ModelClass(**self.config.model.kwargs) 
         self.net.to(self.device)
 
         if self.config.data_loader.batch_size <= self.config.data_loader.real_batch_size:
@@ -57,46 +59,6 @@ class ModelManager():
         except:
             self.clip_grad_norm_max_norm = None
         wandb.watch(self.net, log_freq=100)
-
-    def __build__(self):
-        if self.config.model.name == "BaselineModel":
-            model = BaselineModel(**self.config.model.kwargs)
-            return model
-        if self.config.model.name == "ABMIL":
-            model = ABMIL(**self.config.model.kwargs)
-            return model
-        if self.config.model.name == "ABMIL_Tangle":
-            model = ABMIL_Tangle(**self.config.model.kwargs)
-            return model
-        if self.config.model.name == "ABMIL_Tweak":
-            model = ABMIL_Tweak(**self.config.model.kwargs)
-            return model
-        if self.config.model.name == "MaxPooling":
-            model = MaxPooling(**self.config.model.kwargs)
-            return model
-        if self.config.model.name == "Custom":
-            model = Custom(**self.config.model.kwargs)
-            return model
-        if self.config.model.name == "Custom_Multimodal":
-            model = Custom_Multimodal(**self.config.model.kwargs)
-            return model
-        if self.config.model.name == "Custom_Multimodal_BS":
-            model = Custom_Multimodal_BS(**self.config.model.kwargs)
-            return model        
-        if self.config.model.name == "TransMIL":
-            model = TransMIL(**self.config.model.kwargs)
-            return model
-        if self.config.model.name == "MIL_Attention_FC_surv":
-            model = MIL_Attention_FC_surv(**self.config.model.kwargs)
-            return model
-        if self.config.model.name == "LinearProbe":
-            model = LinearProbe(**self.config.model.kwargs)
-            return model
-        if self.config.model.name == "TITANS":
-            model=TITANS(**self.config.model.kwargs)
-            return model
-        else:
-            raise Exception(f"{self.config.model.name} is not supported!")
         
     def __getLossFunction__(self):
         if self.config.loss.name == "NLLSurvLoss":
@@ -276,7 +238,32 @@ class ModelManager():
         metrics_dict = {k: v.item() if isinstance(v, torch.Tensor) else v for k, v in metrics_dict.items()}
         return metrics_dict   
 
-   
+    def save_XA_attentions(self, batch, step_result, save_path, partition="test", epoch="last"):
+        if "XA_attentions" not in step_result:
+            return
+        attentions = step_result['XA_attentions']
+        slides_str_descriptors = batch['slides_str_descriptor']
+        patient_ids = batch['patient_id']
+        dataset_names = batch['dataset_name']
+        if not self.attention_dir_check:
+            if not os.path.exists(f"{save_path}/attention"):
+                os.makedirs(f"{save_path}/attention")
+            self.attention_dir_check = True
+        for i, patient_id in enumerate(patient_ids):
+            dataset_name = dataset_names[i]
+            for key, val in attentions.items():
+                if val is not None:
+                    slides = slides_str_descriptors[i].split("|")
+                    start = 0
+                    for slide in slides:
+                        slidename, num_patches = slide.split("#")
+                        num_patches = int(num_patches)
+                        if key == "att_genomics_to_patches":
+                            temp = val[i,:,:,start:start+num_patches].detach().cpu()
+                        elif key == "att_patches_to_genomics":
+                            temp = val[i,:,start:start+num_patches,:].detach().cpu()
+                        torch.save(temp, f"{save_path}/attention/{dataset_name}_{patient_id}_{slidename}_{partition}_{epoch}_{key}.pt")
+                        start += num_patches
 
     def step(self, batch, log_dict, task_type="Survival", device="cuda", model=None):
         batch_data = batch['input']
@@ -317,11 +304,14 @@ class ModelManager():
         log_dict["patient_ids"]+=(batch['patient_id'])
         log_dict["dataset_name"]+=(batch['dataset_name'])
 
-        output = {'outputs': outputs, 'labels': labels, 
+        output = {'outputs': outputs, 'labels': labels,                   
                   'censorships': censorships, 'log_dict': log_dict}
-        
-        if self.AEM_lamda > 0:
+        if "XA_attentions" in result:
+            output['XA_attentions'] = result['XA_attentions']   
+
+        if self.AEM_lamda > 0:            
             output['attention'] = result['attention']
+
         return output
 
     def train(self, 
@@ -377,6 +367,7 @@ class ModelManager():
                     log_dict = self.initialize_metrics_dict(task_type)
 
                 step_result = self.step(batch, log_dict, task_type, device)
+                # self.save_XA_attentions(batch, step_result, path, partition="train", epoch="last") # remove it! it is here for debugging
                         
                 outputs = step_result['outputs'] 
                 labels = step_result['labels'] 
@@ -502,6 +493,7 @@ class ModelManager():
                             log_dict = self.initialize_metrics_dict(task_type)
 
                         step_result = self.step(batch, log_dict, task_type, device)
+                        # self.save_XA_attentions(batch, step_result, path, partition="test", epoch="last")
                         
                         outputs = step_result['outputs'] 
                         labels = step_result['labels'] 
@@ -633,7 +625,8 @@ class ModelManager():
                 best=False, 
                 path="", 
                 kfold="",
-                log_aggregated=False):
+                log_aggregated=False,
+                Save_XA_attention_files=False):
         cudnn.benchmark = False
         logging.info("test")   
         df_fold_suffix = f"_{kfold}"
@@ -690,6 +683,8 @@ class ModelManager():
                             log_dict = self.initialize_metrics_dict(task_type)
                     # batch_data = torch.squeeze(batch_data, 0)
                     step_result = self.step(batch, log_dict, task_type, device, model)
+                    if Save_XA_attention_files:
+                        self.save_XA_attentions(batch, step_result, path, partition="test", epoch="best" if best else "last")
                     
                     outputs = step_result['outputs'] 
                     labels = step_result['labels'] 
@@ -734,14 +729,24 @@ class ModelManager():
 
             if task_type == "Survival":
                 to_log = {
-                f"{summary_path}/Aggregated/c-index": out['c-index'],
+                    f"{summary_path}/Aggregated/c-index": out['c-index'],
+                    f"{summary_path}/Aggregated/c-index_std": out['c-index_std'],
+                    f"{summary_path}/Aggregated/c-index_mean": out['c-index_mean'],
                 }
                 # add KM plot
             elif task_type == "Treatment_Response":
                 to_log = {
                 f"{summary_path}/Aggregated/AUC": out['AUC'],
                 f"{summary_path}/Aggregated/Accuracy": out['Accuracy'],
-                f"{summary_path}/Aggregated/F1-Score": out['F1-Score']
+                f"{summary_path}/Aggregated/F1-Score": out['F1-Score'],
+                
+                f"{summary_path}/Aggregated/AUC_std": out['AUC_std'],
+                f"{summary_path}/Aggregated/Accuracy_std": out['Accuracy_std'],
+                f"{summary_path}/Aggregated/F1-Score_std": out['F1-Score_std'],
+                
+                f"{summary_path}/Aggregated/AUC_mean": out['AUC_mean'],
+                f"{summary_path}/Aggregated/Accuracy_mean": out['Accuracy_mean'],
+                f"{summary_path}/Aggregated/F1-Score_mean": out['F1-Score_mean']
                 }
 
                 if 'Confusion_Matrix' in out:

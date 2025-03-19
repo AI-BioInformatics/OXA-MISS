@@ -6,10 +6,11 @@ wandb:
   mode: online
 
 data_loader:
+  file_genes_group: "/work/H2020DeciderFicarra/D2_4/datasets/DECIDER_cohorts/Gene_expression/Expression/daria_mapped.json"
   datasets_configs: ["/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/config/datasets/Decider_dataset_TR_chemorefractory_all_tissues.yaml","/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/config/datasets/TR_PTRC-HGSOC_all_tissues.yaml","/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/config/datasets/TR_OBR_expandedv2_all_tissues.yaml"]
   task_type: "Treatment_Response"
   max_patches: 4096
-  batch_size: 4
+  batch_size: 1
   real_batch_size: 4
   n_bins: 4
   sample: True
@@ -30,7 +31,7 @@ data_loader:
     internal_val_size: 0.0
 
 model:
-  name: Custom_Multimodal_BS
+  name: Custom_Multimodal
   pretrained: False # False # True
   kwargs:
     input_dim: 1024
