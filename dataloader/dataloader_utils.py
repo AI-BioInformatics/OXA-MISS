@@ -1,4 +1,5 @@
 from torch.utils.data import Dataset, DataLoader, Subset
+from torch import Generator
 import numpy as np
 import pandas as pd
 
@@ -42,23 +43,32 @@ def extract_names(f):
 
 
 def get_dataloaders(dataset, train_patients, val_patients, test_patients, config):
-    mask = np.isin(train_patients, dataset.patient_df.index)
-    # Filter the array to keep only elements in df.index
-    filtered_train_patients = train_patients[mask]
-    if len(filtered_train_patients) != len(train_patients):
-        print("Some train patients are not in the dataset: ", set(train_patients) - set(filtered_train_patients))
     prefetch_factor = 4
     if config.data_loader.num_workers == 0:
         prefetch_factor = None
-    train_dataloader = DataLoader(
-                                Subset(dataset, filtered_train_patients), 
-                                batch_size=config.data_loader.batch_size, 
-                                shuffle=True, 
-                                drop_last=True, 
-                                pin_memory=True, 
-                                num_workers=config.data_loader.num_workers, 
-                                prefetch_factor=prefetch_factor
-                            )
+    
+    if train_patients is not None:
+        mask = np.isin(train_patients, dataset.patient_df.index)
+        # Filter the array to keep only elements in df.index
+        filtered_train_patients = train_patients[mask]
+        if len(filtered_train_patients) != len(train_patients):
+            print("Some train patients are not in the dataset: ", set(train_patients) - set(filtered_train_patients))
+        
+        g = Generator()
+        g.manual_seed(42)
+        train_dataloader = DataLoader(
+                                    Subset(dataset, filtered_train_patients), 
+                                    batch_size=config.data_loader.batch_size, 
+                                    shuffle=True, 
+                                    generator=g,
+                                    drop_last=True, 
+                                    pin_memory=True, 
+                                    num_workers=config.data_loader.num_workers, 
+                                    prefetch_factor=prefetch_factor,
+                                    persistent_workers=True
+                                )
+    else:
+        train_dataloader = None
     if val_patients is not None:
         mask = np.isin(val_patients, dataset.patient_df.index)
         filtered_val_patients = val_patients[mask]
@@ -75,6 +85,7 @@ def get_dataloaders(dataset, train_patients, val_patients, test_patients, config
                                         pin_memory=True, 
                                         num_workers=config.data_loader.num_workers, 
                                         prefetch_factor=prefetch_factor,
+                                        persistent_workers=True
                                 )
     else:
         val_dataloader = None   
@@ -94,6 +105,7 @@ def get_dataloaders(dataset, train_patients, val_patients, test_patients, config
                                         pin_memory=True, 
                                         num_workers=config.data_loader.num_workers, 
                                         prefetch_factor=prefetch_factor,
+                                        persistent_workers=True
                                     )
     else:
         test_dataloader = None
