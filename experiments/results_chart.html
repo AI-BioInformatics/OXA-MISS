@@ -1,0 +1,866 @@
+<!DOCTYPE html>
+
+<!-- 
+Prompt usato per creare la pagina:
+
+Scrivi un applicazione Vue js che permetta la visualizzazione su grafico dei dati rigurdanti le performance di alcuni modelli di intelligenza artificiale.
+Una volta caricato il file CSV contenente questi dati, deve comparire un menu a checkbox con il titolo: "feature del modello"
+per ogni colonna del file CSV, ad eccezione della colonna "ID", deve essere presente una checkbox con il nome della colonna. Tutte le colonne selezionate faranno parte della lista "model_features", quelle non selezionate faranno parte della lista "model_performances"
+
+Il grafico deve essere un grafico di dispersione (quindi con dei punti su di esso), in cui ogni punto corrisponde ad un modello. il grafico è personalizzabile, in quanto l'utente puo indicare cosa visualizzare sugli assi e come clusterizzare i punti sul grafico. Andando con il cursore su ciascuno dei punti deve essere visualizzato il valore della colonna ID della riga corrispondente a quel modello nel file CSV.
+
+personalizzazione del grafico:
+voglio avere un menu di selezione per ciascun asse X e Y, con tiolo "Setting Asse X" e "Setting Asse Y". i due menu devono essere visualizzati uno a fianco all'altro.
+i due menu, che definiscono cosa deve essere visualizzato sul grafico, sono identici è sono strutturati in questo modo:
+(radio input) Modelli
+(radio input) Media
+	(checkbox) AUC
+	(checkbox) F1-Score
+	(checkbox) Accuracy
+	
+in pratica, se l'utente seleziona Modelli, semplicemente l'asse in question non riporterà le performance ma ad ogni tick dell'asse corripondera un modello diverso.
+Se invece l'utente seleziona Media e seleziona le checkboxe dei valori di cui vuole fare la media, su quell'asse sara visualizzata la media dei valori selezionati. Sopra ti ho messo come esempio AUC, F1-Score e Accuracy, ma in realta ci deve essere una checkbox per ogni colonna del csv contenuta nella lista "model_performances".
+
+a parte questi due menu, ce ne deve essere un altro sotto di essi. il titolo del menu deve essere "Clustering" e mostra una lista di checkbox, una per ogni colonna contenuta in "model_features". Quindi, cambiando queste checkboxe, i tutti i modelli che hanno le feature checkate uguali, devono avere lo stesso colore sul grafico.
+In fine, deve essere visibile una tabella che spiega per ogni colore a quali valori delle feature selezionate corrisponde. questa tabella non deve essere sul grafico in modo da non ridurne la leggibilità. -->
+
+<html lang="it">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Visualizzatore Performance Modelli AI</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/vue/3.3.4/vue.global.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+<!-- Chart.js 4 -->
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+
+<!-- Plugin Box & Violin Plot -->
+<script src="https://cdn.jsdelivr.net/npm/@sgratzl/chartjs-chart-boxplot@4.4.4/build/index.umd.min.js"></script>
+
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/bulma/0.9.4/css/bulma.min.css">
+  
+  <style>
+    .chart-container {
+      width: 100%;
+      height: 500px;
+      position: relative;
+    }
+    .setting-container {
+      display: flex;
+      gap: 20px;
+    }
+    .axis-setting {
+      flex: 1;
+    }
+    .table-container {
+      margin-top: 20px;
+      overflow-y: auto;
+    }
+    .checkbox-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+    .checkbox-item {
+      flex-basis: 200px;
+    }
+  </style>
+</head>
+<body>
+  <div id="app" class="container p-4">
+    <h1 class="title is-3">Visualizzatore Performance Modelli AI</h1>
+
+    <div class="box mb-5">
+      <div class="file has-name is-fullwidth">
+        <label class="file-label">
+          <input class="file-input" type="file" accept=".csv" @change="uploadCSV">
+          <span class="file-cta">
+            <span class="file-label">Carica file CSV</span>
+          </span>
+          <span class="file-name" v-if="fileName">{{ fileName }}</span>
+          <span class="file-name" v-else>Nessun file selezionato</span>
+        </label>
+      </div>
+    </div>
+
+    <div v-show="!fileLoaded">Caricamento CSV predefinito...</div>
+
+    <div v-show="fileLoaded">
+      <!-- Feature Selection -->
+      <div class="box mb-5">
+        <h3 class="title is-5">Feature del modello</h3>
+        <div class="checkbox-list">
+          <div v-for="column in availableColumns" :key="column" class="checkbox-item">
+            <label class="checkbox">
+              <input type="checkbox" v-model="selectedFeatures" :value="column">
+              {{ column }}
+            </label>
+          </div>
+        </div>
+      </div>
+
+      <!-- Chart Settings -->
+      <div class="box mb-5">
+        <div class="setting-container">
+          <!-- X Axis Settings -->
+          <div class="axis-setting">
+            <h3 class="title is-5">Setting Asse X</h3>
+            <div class="control">
+              <label class="radio">
+                <input type="radio" v-model="xAxisType" value="models">
+                Modelli
+              </label>
+            </div>
+            <div class="control mb-3">
+              <label class="radio">
+                <input type="radio" v-model="xAxisType" value="average">
+                Media
+              </label>
+            </div>
+            <div v-if="xAxisType === 'average'" class="pl-4 checkbox-list">
+              <div v-for="metric in performanceMetrics" :key="metric" class="checkbox-item">
+                <label class="checkbox">
+                  <input type="checkbox" v-model="xAxisMetrics" :value="metric">
+                  {{ metric }}
+                </label>
+              </div>
+            </div>
+          </div>
+
+          <!-- Y Axis Settings -->
+          <div class="axis-setting">
+            <h3 class="title is-5">Setting Asse Y</h3>
+            <div class="control">
+              <label class="radio">
+                <input type="radio" v-model="yAxisType" value="models">
+                Modelli
+              </label>
+            </div>
+            <div class="control mb-3">
+              <label class="radio">
+                <input type="radio" v-model="yAxisType" value="average">
+                Media
+              </label>
+            </div>
+            <div v-if="yAxisType === 'average'" class="pl-4 checkbox-list">
+              <div v-for="metric in performanceMetrics" :key="metric" class="checkbox-item">
+                <label class="checkbox">
+                  <input type="checkbox" v-model="yAxisMetrics" :value="metric">
+                  {{ metric }}
+                </label>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Clustering Settings -->
+        <div class="mt-5">
+          <h3 class="title is-5">Clustering</h3>
+          <div class="checkbox-list">
+            <div v-for="feature in modelFeatures" :key="feature" class="checkbox-item">
+              <label class="checkbox">
+                <input type="checkbox" v-model="clusteringFeatures" :value="feature">
+                {{ feature }}
+              </label>
+            </div>
+          </div>
+        </div>
+
+        <!-- Filtri -->
+        <div class="mt-5">
+          <h3 class="title is-5">Filtri</h3>
+          <div class="field is-grouped">
+            <div class="control">
+              <div class="select">
+                <select v-model="filterColumn">
+                  <option value="" disabled>Seleziona colonna</option>
+                  <option v-for="column in availableColumns" :key="column" :value="column">{{ column }}</option>
+                </select>
+              </div>
+            </div>
+
+            <div class="control">
+              <div class="select">
+                <select v-model="filterOperator">
+                  <option value="" disabled>Seleziona operatore</option>
+                  <option value=">">></option>
+                  <option value="<"><</option>
+                  <option value="IN">IN</option>
+                </select>
+              </div>
+            </div>
+
+            <div class="control">
+              <input class="input" type="text" v-model="filterValue" placeholder="Valore filtro">
+            </div>
+
+            <div class="control">
+              <button class="button is-primary" @click="addFilter">Applica Filtro</button>
+            </div>
+          </div>
+
+          <div class="tags mt-3">
+            <span v-for="(filter, index) in activeFilters" :key="index" class="tag is-info is-light">
+              {{ filter.column }} {{ filter.operator }} {{ filter.value }}
+              <button class="delete is-small" @click="removeFilter(index)"></button>
+            </span>
+          </div>
+        </div>
+
+        <button class="button is-primary mt-4" @click="updateChart">Aggiorna Grafico</button>
+      </div>
+
+      <!-- Chart View -->
+      <div class="box mb-5">
+        <div class="chart-container">
+          <canvas id="scatterChart"></canvas>
+        </div>
+      </div>
+    <!-- Boxplot View -->
+    <div class="box mb-5">
+      <div class="chart-container">
+        <canvas id="boxplotChart"></canvas>
+      </div>
+    </div>
+    <!-- Violin Plot View -->
+    <div class="box mb-5">
+      <div class="chart-container">
+        <canvas id="violinChart"></canvas>
+      </div>
+    </div>
+
+      <!-- Clustering Legend Table -->
+      <div class="box">
+        <h3 class="title is-5">Legenda Clustering</h3>
+        <div class="table-container">
+          <table class="table is-fullwidth is-striped">
+            <thead>
+              <tr>
+                <th>Colore</th>
+                <th v-for="feature in clusteringFeatures" :key="feature">{{ feature }}</th>
+                <th>Modelli</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="(cluster, index) in clusterGroups" :key="index">
+                <td>
+                  <div class="is-flex is-align-items-center">
+                    <div :style="{
+                      backgroundColor: getColorForCluster(index),
+                      width: '20px',
+                      height: '20px',
+                      borderRadius: '50%'
+                    }"></div>
+                  </div>
+                </td>
+                <td v-for="feature in clusteringFeatures" :key="feature">
+                  {{ cluster.key.split('-')[clusteringFeatures.indexOf(feature)] }}
+                </td>
+                <td>{{ cluster.models.join(', ') }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+  <script>
+    const defaultCSVfile = 'test_results_csv/Surv_Custom_Multimodal_XA_v2.csv';
+    window.addEventListener('DOMContentLoaded', () => {
+      fetch(defaultCSVfile)
+        .then(response => response.blob())
+        .then(blob => {
+          const file = new File([blob], defaultCSVfile, { type: 'text/csv' });
+          const input = document.querySelector('.file-input');
+          const dataTransfer = new DataTransfer();
+          dataTransfer.items.add(file);
+          input.files = dataTransfer.files;
+          input.dispatchEvent(new Event('change'));
+        });
+    });
+  </script>
+  <script>
+    const { createApp, ref, computed, watch, onMounted, nextTick  } = Vue;
+
+    
+    createApp({
+      setup() {
+        const activeFilters = ref([]); // Lista dei filtri attivi
+        const filteredData = ref([]); // Store filtered rows
+        const filterColumn = ref(''); // Selected column for filtering
+        const filterOperator = ref(''); // Selected operator
+        const filterValue = ref(''); // Input value for filtering
+
+        const fileLoaded = ref(false);
+        const fileName = ref('');
+        const csvData = ref([]);
+        const csvHeaders = ref([]);
+        const selectedFeatures = ref([]);
+        const availableColumns = ref([]);
+        const xAxisType = ref('models');
+        const yAxisType = ref('average');
+        const xAxisMetrics = ref([]);
+        const yAxisMetrics = ref([]);
+        const clusteringFeatures = ref([]);
+        let chart = null;
+        let activeTooltip = null;
+        
+        // Computed properties
+        const modelFeatures = computed(() => {
+          return selectedFeatures.value;
+        });
+        
+        const modelPerformances = computed(() => {
+          return availableColumns.value.filter(col => 
+            col !== 'ID' && !selectedFeatures.value.includes(col)
+          );
+        });
+        
+        const performanceMetrics = computed(() => {
+          return modelPerformances.value;
+        });
+        
+        const clusterGroups = computed(() => {
+          if (!clusteringFeatures.value.length || !filteredData.value.length) return [];
+          
+          const clusters = {};
+          
+          filteredData.value.forEach(row => {
+            // Create a unique key based on the selected clustering features
+            const clusterKey = clusteringFeatures.value.map(feature => row[feature]).join('-');
+            
+            if (!clusters[clusterKey]) {
+              clusters[clusterKey] = {
+                key: clusterKey,
+                features: clusteringFeatures.value.reduce((acc, feature, index) => {
+                  acc[feature] = clusterKey.split('-')[index];
+                  return acc;
+                }, {}),
+                models: [row.ID]
+              };
+            } else {
+              clusters[clusterKey].models.push(row.ID);
+            }
+          });
+          
+          return Object.values(clusters);
+        });
+        
+        // Functions
+        const uploadCSV = (event) => {
+          const file = event.target.files[0];
+          if (file) {
+            fileName.value = file.name;
+            
+            Papa.parse(file, {
+              header: true,
+              dynamicTyping: true,
+              complete: (results) => {
+                csvData.value = results.data.filter(row => row.ID); // Make sure we have valid rows
+                csvHeaders.value = results.meta.fields;
+                availableColumns.value = csvHeaders.value.filter(header => header !== 'ID');
+                
+                // Initially all columns except ID are in performance metrics
+                selectedFeatures.value = JSON.parse(localStorage.getItem('selectedFeatures')) || [];
+                // Remove any selected features that are no longer in the CSV headers
+                selectedFeatures.value = selectedFeatures.value.filter(feature => 
+                  csvHeaders.value.includes(feature)
+                );
+
+
+                clusteringFeatures.value = JSON.parse(localStorage.getItem('clusteringFeatures')) || [];
+                // Remove any clustering features that are not included in selectedFeatures
+                clusteringFeatures.value = clusteringFeatures.value.filter(feature => 
+                  selectedFeatures.value.includes(feature)
+                );
+
+                activeFilters.value = JSON.parse(localStorage.getItem('activeFilters')) || [];
+                activeFilters.value = activeFilters.value.filter(filter => 
+                  csvHeaders.value.includes(filter.column)
+                );
+                
+                fileLoaded.value = true;
+                
+                xAxisMetrics.value = JSON.parse(localStorage.getItem('xAxisMetrics')) || [];;
+                yAxisMetrics.value = JSON.parse(localStorage.getItem('yAxisMetrics')) || [];;
+                xAxisType.value = localStorage.getItem('xAxisType') || 'models';
+                yAxisType.value = localStorage.getItem('yAxisType') || 'average';
+                
+                applyFilters();
+
+                // Initialize chart after data is loaded
+                nextTick(() => {
+                  initChart();
+                  initBoxplot();
+                  initViolinPlot();
+                });
+                
+              }
+            });
+          }
+        };
+        
+        const getColorForCluster = (index) => {
+        const colors = [
+  '#FF6384', '#36A2EB', '#FFCE56', '#4BC0C0', '#9966FF',
+  '#FF9F40', '#C9CBCF', '#7CFC00', '#00CED1', '#FF1493',
+  '#32CD32', '#FFD700', '#8A2BE2', '#FF4500', '#2E8B57',
+  '#1E90FF', '#DC143C', '#8B008B', '#FF8C00', '#20B2AA',
+  '#7B68EE', '#D2691E', '#A52A2A', '#5F9EA0', '#00FA9A',
+  '#DB7093', '#4682B4', '#9ACD32', '#800000', '#9B30FF',
+  '#3CB371', '#FFA07A', '#6A5ACD', '#BDB76B', '#40E0D0',
+  '#F08080', '#556B2F', '#8FBC8F', '#CD5C5C', '#B22222',
+  '#4169E1', '#EE82EE', '#B8860B', '#DDA0DD', '#8A2BE2',
+  '#00BFFF', '#ADFF2F', '#9932CC', '#FA8072', '#F4A460',
+  '#FF6347', '#FF00FF', '#DA70D6', '#BA55D3', '#6495ED',
+  '#DC143C', '#3CB371', '#FFA500', '#7FFF00', '#00FF7F'
+];
+
+          
+          return colors[index % colors.length];
+        };
+        
+        const calculateAverage = (row, metrics) => {
+          if (!metrics || metrics.length === 0) return 0;
+          
+          const sum = metrics.reduce((acc, metric) => {
+            return acc + (row[metric] || 0);
+          }, 0);
+          
+          return sum / metrics.length;
+        };
+        
+        const getClusterKeyForRow = (row) => {
+          if (!clusteringFeatures.value.length) return '0';
+          return clusteringFeatures.value.map(feature => row[feature]).join('-');
+        };
+        const getYRangeForPlots = () => {
+          const groupedValues = {};
+          filteredData.value.forEach(row => {
+            const key = getClusterKeyForRow(row);
+            if (!groupedValues[key]) groupedValues[key] = [];
+            if (yAxisType.value === 'average') {
+              const val = calculateAverage(row, yAxisMetrics.value);
+              groupedValues[key].push(val);
+            }
+          });
+        
+          const allValues = Object.values(groupedValues).flat();
+          const yMin = Math.min(...allValues);
+          const yMax = Math.max(...allValues);
+          const yPadding = (yMax - yMin) * 0.1 || 0.05;
+        
+          return {
+            groupedValues,
+            yMin: yMin - yPadding,
+            yMax: yMax + yPadding
+          };
+        };
+        
+        const getClusterIndexForKey = (key) => {
+          return clusterGroups.value.findIndex(cluster => cluster.key === key);
+        };
+        
+        const initChart = () => {
+          const canvas = document.getElementById('scatterChart');
+
+          // Se esiste già un grafico su questo canvas, distruggilo prima
+          if (Chart.getChart(canvas)) {
+            Chart.getChart(canvas).destroy();
+          }
+          const ctx = canvas.getContext('2d');
+          
+          chart = new Chart(ctx, {
+            type: 'scatter',
+            data: {
+              datasets: []
+            },
+            options: {
+              responsive: true,
+              maintainAspectRatio: false,
+              plugins: {
+                tooltip: {
+                  callbacks: {
+                    label: (context) => {
+                      const rowIndex = context.dataIndex;
+                      const datasetIndex = context.datasetIndex;
+                      const row = chart.data.datasets[datasetIndex].data[rowIndex];
+                      const arrayLines = [
+                          `ID: ${row.ID}`,
+                          `Model: ${row.model_name}`,
+                          `genomics_group_name: ${row.genomics_group_name}`,
+                          `genomics_group_dropout: ${row.genomics_group_dropout}`,
+                          `cnv_group_name: ${row.cnv_group_name}`,
+                          `cnv_group_dropout: ${row.cnv_group_dropout}`,
+                          `inner_dim: ${row.inner_dim}`,
+                          `num_latent_queries: ${row.num_latent_queries}`,
+                          `wsi_dropout: ${row.wsi_dropout}`,
+                          `use_layernorm: ${row.use_layernorm}`,
+                          `dropout: ${row.dropout}`,
+                          `input_modalities: ${row.input_modalities}`,
+                      ]
+                      // const str_out = `` 
+                      return arrayLines;
+                    }
+                  },
+                  // events: ['click']
+                }
+              },
+              scales: {
+                x: {
+                  title: {
+                    display: true,
+                    text: 'Asse X'
+                  }
+                },
+                y: {
+                  title: {
+                    display: true,
+                    text: 'Asse Y'
+                  }
+                }
+              }
+            }
+          });
+          
+          // Initial chart update
+          updateChart();
+        };
+        const initBoxplot = () => {
+          const { groupedValues, yMin, yMax } = getYRangeForPlots();
+          const canvas = document.getElementById('boxplotChart');
+          // 💣 Assicura che il canvas sia libero
+          if (Chart.getChart(canvas)) {
+            Chart.getChart(canvas).destroy();
+          }
+
+          const ctx = canvas.getContext('2d');
+
+        
+          filteredData.value.forEach(row => {
+            const clusterKey = getClusterKeyForRow(row);
+            if (!groupedValues[clusterKey]) groupedValues[clusterKey] = [];
+        
+            if (yAxisType.value === 'average') {
+              const avg = calculateAverage(row, yAxisMetrics.value);
+              groupedValues[clusterKey].push(avg);
+            }
+          });
+
+          
+          const labels = Object.keys(groupedValues).map((key, idx) => `Cluster ${idx + 1}`);
+          const datasets = [{
+            label: `Boxplot di ${yAxisMetrics.value.join(', ')}`,
+            backgroundColor: labels.map((_, idx) => getColorForCluster(idx)),
+            borderColor: labels.map((_, idx) => getColorForCluster(idx)),
+            borderWidth: 1,
+            outlierColor: '#999999',
+            padding: 10,
+            itemRadius: 0,
+            data: Object.values(groupedValues)
+          }];
+        
+          window.boxplotChart = new Chart(ctx, {
+            type: 'boxplot',
+            data: {
+              labels,
+              datasets
+            },
+            options: {
+              responsive: true,
+              maintainAspectRatio: false,
+              plugins: {
+                legend: { display: false }
+              },
+              scales: {
+                y: {
+                  title: {
+                    display: true,
+                    text: 'Valore'
+                  },
+                  min: yMin,
+                  max: yMax 
+                }
+              }
+            }
+          });
+        };
+        const initViolinPlot = () => {
+          const canvas = document.getElementById('violinChart');
+          if (Chart.getChart(canvas)) Chart.getChart(canvas).destroy();
+          const ctx = canvas.getContext('2d');
+        
+          // Ottieni dati aggregati e range Y dinamico condiviso
+          const { groupedValues, yMin, yMax } = getYRangeForPlots();
+        
+          const labels = Object.keys(groupedValues).map((_, idx) => `Cluster ${idx + 1}`);
+          const dataValues = Object.values(groupedValues);
+          const colors = labels.map((_, idx) => getColorForCluster(idx));
+        
+          new Chart(ctx, {
+            type: 'violin',
+            data: {
+              labels,
+              datasets: [{
+                label: `Distribuzione ${yAxisMetrics.value.join(', ')}`,
+                data: dataValues,
+                backgroundColor: colors,
+                borderColor: colors,
+                borderWidth: 1
+              }]
+            },
+            options: {
+              responsive: true,
+              maintainAspectRatio: false,
+              scales: {
+                y: {
+                  title: {
+                    display: true,
+                    text: 'Valore'
+                  },
+                  min: yMin,
+                  max: yMax
+                }
+              },
+              plugins: {
+                legend: { display: false }
+              }
+            }
+          });
+        };
+        
+        const saveChartSetting = () => {
+          localStorage.setItem('selectedFeatures', JSON.stringify(selectedFeatures.value));
+          localStorage.setItem('clusteringFeatures', JSON.stringify(clusteringFeatures.value));
+          localStorage.setItem('xAxisType', xAxisType.value);
+          localStorage.setItem('yAxisType', yAxisType.value);
+          localStorage.setItem('xAxisMetrics', JSON.stringify(xAxisMetrics.value));
+          localStorage.setItem('yAxisMetrics', JSON.stringify(yAxisMetrics.value));
+          localStorage.setItem('activeFilters', JSON.stringify(activeFilters.value));
+        };
+
+        const addFilter = () => {
+          if (!filterColumn.value || !filterOperator.value || !filterValue.value) {
+            alert('Tutti i campi del filtro devono essere compilati.');
+            return;
+          }
+
+          // Aggiungi il filtro alla lista dei filtri attivi
+          activeFilters.value.push({
+            column: filterColumn.value,
+            operator: filterOperator.value,
+            value: filterValue.value
+          });
+
+          // Resetta i campi del filtro
+          filterColumn.value = '';
+          filterOperator.value = '';
+          filterValue.value = '';
+
+          // Applica i filtri aggiornati
+          applyFilters();
+        };
+
+        const removeFilter = (index) => {
+          // Rimuovi il filtro dalla lista
+          activeFilters.value.splice(index, 1);
+
+          // Applica i filtri aggiornati
+          applyFilters();
+        };
+
+        const applyFilters = () => {
+            if (activeFilters.value.length === 0) {
+              filteredData.value = csvData.value; // Nessun filtro applicato
+              updateChart();
+              initBoxplot();
+              initViolinPlot();
+              return;
+            }
+
+            // Applica tutti i filtri attivi
+            filteredData.value = csvData.value.filter(row => {
+              return activeFilters.value.every(filter => {
+                if (filter.operator === 'IN') {
+                  const values = filter.value.split(',').map(v => v.trim());
+                  return values.includes(String(row[filter.column]));
+                } else if (['>', '<'].includes(filter.operator)) {
+                  const numericValue = parseFloat(filter.value);
+                  if (isNaN(numericValue)) return false;
+                  return filter.operator === '>'
+                    ? row[filter.column] > numericValue
+                    : row[filter.column] < numericValue;
+                }
+                return true;
+              });
+            });
+
+            updateChart(); // Aggiorna il grafico con i dati filtrati
+          };
+        
+        const updateChart = () => {
+          if (!chart) return;
+          
+          // Clear previous data
+          chart.data.datasets = [];
+          
+          // Group data by clusters
+          const clusterData = {};
+          
+          filteredData.value.forEach(row => {
+          let x, y;
+
+          // Calculate X value based on selected type
+          if (xAxisType.value === 'models') {
+            x = filteredData.value.findIndex(r => r.ID === row.ID);
+          } else {
+            x = calculateAverage(row, xAxisMetrics.value);
+          }
+
+          // Calculate Y value based on selected type
+          if (yAxisType.value === 'models') {
+            y = filteredData.value.findIndex(r => r.ID === row.ID);
+          } else {
+            y = calculateAverage(row, yAxisMetrics.value);
+          }
+
+          // Get cluster key and index
+          const clusterKey = getClusterKeyForRow(row);
+
+          if (!clusterData[clusterKey]) {
+            clusterData[clusterKey] = [];
+          }
+
+          clusterData[clusterKey].push({
+            x: x,
+            y: y,
+            ID: row.ID,
+            model_name: row.model_name,
+            genomics_group_name: row.genomics_group_name,
+            genomics_group_dropout: row.genomics_group_dropout,
+            cnv_group_name: row.cnv_group_name,
+            cnv_group_dropout: row.cnv_group_dropout,
+            inner_dim: row.inner_dim,
+            num_latent_queries: row.num_latent_queries,
+            wsi_dropout: row.wsi_dropout,
+            use_layernorm: row.use_layernorm,
+            dropout: row.dropout,
+            output_dim: row.output_dim,
+            input_modalities: row.input_modalities
+          });
+        });
+
+        // Create datasets for each cluster
+        Object.keys(clusterData).forEach(clusterKey => {
+          const clusterIndex = getClusterIndexForKey(clusterKey);
+
+          chart.data.datasets.push({
+            label: `Cluster ${clusterIndex + 1}`,
+            data: clusterData[clusterKey],
+            backgroundColor: getColorForCluster(clusterIndex),
+            pointRadius: 8,
+            pointHoverRadius: 10
+          });
+        });
+          
+          // Update axes labels
+          let xAxisLabel = '';
+          if (xAxisType.value === 'models') {
+            xAxisLabel = 'Modelli';
+          } else {
+            xAxisLabel = `Media (${xAxisMetrics.value.join(', ')})`;
+          }
+          
+          let yAxisLabel = '';
+          if (yAxisType.value === 'models') {
+            yAxisLabel = 'Modelli';
+          } else {
+            yAxisLabel = `Media (${yAxisMetrics.value.join(', ')})`;
+          }
+          
+          chart.options.scales.x.title.text = xAxisLabel;
+          chart.options.scales.y.title.text = yAxisLabel;
+          
+          // If models on X axis, customize ticks
+          if (xAxisType.value === 'models') {
+            chart.options.scales.x.type = 'category';
+            chart.options.scales.x.labels = csvData.value.map(row => row.ID);
+          } else {
+            chart.options.scales.x.type = 'linear';
+          }
+          
+          // If models on Y axis, customize ticks
+          if (yAxisType.value === 'models') {
+            chart.options.scales.y.type = 'category';
+            chart.options.scales.y.labels = csvData.value.map(row => row.ID);
+          } else {
+            chart.options.scales.y.type = 'linear';
+          }
+          
+          saveChartSetting();
+          chart.update();
+          initBoxplot();
+          initViolinPlot();
+        };
+        
+        // Watch for changes in key selections
+        watch([
+          modelFeatures, 
+          xAxisType, 
+          yAxisType, 
+          xAxisMetrics, 
+          yAxisMetrics, 
+          clusteringFeatures
+        ], () => {
+          // Do not auto-update on every change to avoid too many refreshes
+          // Let user click the update button instead
+        }, { deep: true });
+                // Caricamento automatico del file CSV predefinito
+                onMounted(() => {
+                  fetch(defaultCSVfile)
+                    .then(response => response.blob())
+                    .then(blob => {
+                      const file = new File([blob], defaultCSVfile, { type: 'text/csv' });
+                      const input = document.querySelector('.file-input');
+                      const dataTransfer = new DataTransfer();
+                      dataTransfer.items.add(file);
+                      input.files = dataTransfer.files;
+                      input.dispatchEvent(new Event('change'));
+                    });
+                });
+        return {
+          filterColumn,
+          filterOperator,
+          filterValue,
+          filteredData,
+          activeFilters,
+          addFilter,
+          removeFilter,
+          applyFilters,
+
+          fileLoaded,
+          fileName,
+          csvData,
+          availableColumns,
+          selectedFeatures,
+          xAxisType,
+          yAxisType,
+          xAxisMetrics,
+          yAxisMetrics,
+          clusteringFeatures,
+          modelFeatures,
+          performanceMetrics,
+          clusterGroups,
+          uploadCSV,
+          updateChart,
+          saveChartSetting,
+          getColorForCluster
+        };
+      }
+    }).mount('#app');
+    
+  </script>
+
+  
+</body>
+</html>

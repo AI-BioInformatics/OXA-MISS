@@ -9,6 +9,7 @@ from lifelines.statistics import logrank_test
 from sklearn.metrics import confusion_matrix
 from sklearn.metrics import roc_auc_score, confusion_matrix,f1_score
 from sksurv.metrics import concordance_index_censored
+from collections import defaultdict
 
 import importlib.util
 import sys
@@ -159,12 +160,67 @@ def accuracy_confusionMatrix_plot(log_dict, metrics_df):
     # Return the PIL Image object to be logged later
     return image
 
+
+class ResultsStore:
+    def __init__(self):
+        # Structure: {scenario: {model_version: [fold_results]}}
+        self.results = defaultdict(lambda: defaultdict(list))
+        self.current_fold = 0
+        
+    def add_result(self, scenario, model_version, fold_result, fold_num=None):
+        """Store results for a single fold"""
+        if fold_num is not None:
+            self.current_fold = fold_num
+        self.results[scenario][model_version].append(fold_result)
+        
+    def compute_aggregated_metrics(self, scenario, task_type="Survival"):
+        """Calculate aggregated metrics for all model versions in a scenario"""
+        aggregated = {}
+        
+        for model_version, fold_results in self.results[scenario].items():
+            if task_type == "Survival":
+                c_indices = [r["c-index"] for r in fold_results]
+                metrics = {
+                    "c-index_mean": np.mean(c_indices),
+                    "c-index_std": np.std(c_indices),
+                    "c-index_list": c_indices
+                }
+            
+            elif task_type == "Treatment_Response":
+                aucs = [r["AUC"] for r in fold_results]
+                f1s = [r["F1-Score"] for r in fold_results]
+                accs = [r["Accuracy"] for r in fold_results]
+                
+                metrics = {                    
+                    "AUC_mean": np.mean(aucs),
+                    "F1-Score_mean": np.mean(f1s), 
+                    "Accuracy_mean": np.mean(accs),
+                    
+                    "AUC_std": np.std(aucs),
+                    "F1-Score_std": np.std(f1s),
+                    "Accuracy_std": np.std(accs),
+                    
+                    "AUC_list": aucs,
+                    "F1-Score_list": f1s,
+                    "Accuracy_list": accs
+                }
+                
+                # if "Confusion_Matrix" in fold_results[-1]:
+                #     metrics["Confusion_Matrix"] = fold_results[-1]["Confusion_Matrix"]
+                    
+                metrics["Mean_F1-Score_AUC"] = (metrics["F1-Score_mean"] + metrics["AUC_mean"]) / 2
+            
+            # metrics["model_version"] = model_version
+            aggregated[model_version] = metrics
+            
+        return aggregated
+
 def kfold_results_merge(result_id_path, prefix='last_epoch_test_df_Fold_', task_type='Survival'):
     
     folder = result_id_path
     paths = [
         os.path.join(result_id_path,f)
-        for f in os.listdir(folder)
+        for f in sorted(os.listdir(folder))
         if os.path.isfile(os.path.join(folder, f)) and f.startswith(prefix)
     ]
 
@@ -181,7 +237,7 @@ def kfold_results_merge(result_id_path, prefix='last_epoch_test_df_Fold_', task_
         all_censorships = df["all_censorships"].values
         all_event_times = df["all_event_times"].values
         c_index = concordance_index_censored((1-all_censorships).astype(bool), all_event_times, all_risk_scores, tied_tol=1e-08)[0] 
-        return {"c-index": c_index}
+        return {"c-index": round(c_index, 3)}
     
     def treatment_response_results_merge(df):
         all_labels = df["all_labels"].values
@@ -225,12 +281,15 @@ def kfold_results_merge(result_id_path, prefix='last_epoch_test_df_Fold_', task_
 
         std_out = {}
         mean_out = {}
+        list_out = {}
         for key in out:
             if isinstance(out[key], int) or isinstance(out[key], float):
                 std_out[f'{key}_std'] = np.std(folds_out[key])
                 mean_out[f'{key}_mean'] = np.mean(folds_out[key])
+                list_out[f'{key}_list'] = folds_out[key]
         out.update(std_out)
         out.update(mean_out)
+        out.update(list_out)
 
     return out
 

@@ -161,7 +161,7 @@ class FeedForwardLayer(nn.Module):
         x = self.linear2(x)
         return x
 
-class Custom_Multimodal_XA(nn.Module):
+class Custom_Multimodal_XA_v2(nn.Module):
     def __init__(self, 
                     input_dim=1024, 
                     genomics_group_name = ["high_refractory", "high_sensitive", "hypoxia_pathway"],
@@ -185,7 +185,7 @@ class Custom_Multimodal_XA(nn.Module):
                     WSI_level_encoder_sizes= [768, 60, 10],
                     WSI_level_encoder_LayerNorm= True,
                     ):
-        super(Custom_Multimodal_XA,self).__init__()
+        super(Custom_Multimodal_XA_v2,self).__init__()
         self.input_modalities = input_modalities
         self.inner_proj = nn.Linear(input_dim, inner_dim)
         self.output_dim = output_dim
@@ -345,31 +345,31 @@ class Custom_Multimodal_XA(nn.Module):
             else:
                 att_patches_to_cnv = None
             if "Genomics" in self.input_modalities and data["genomics_status"].item() is True:
-                patch_embeddings = patch_embeddings + x   
-            #     patch_embeddings_updated = patch_embeddings + x  
-            # else:
-            #     patch_embeddings_updated = patch_embeddings
+                # patch_embeddings = patch_embeddings + x   
+                patch_embeddings_updated = patch_embeddings + x  
+            else:
+                patch_embeddings_updated = patch_embeddings
             if "CNV" in self.input_modalities and data["cnv_status"].item() is True:
-                patch_embeddings = patch_embeddings + y 
-            #     patch_embeddings_updated = patch_embeddings + y
-            # else:
-            #     patch_embeddings_updated = patch_embeddings
+                # patch_embeddings = patch_embeddings + y 
+                patch_embeddings_updated = patch_embeddings + y
+            else:
+                patch_embeddings_updated = patch_embeddings
             XA_attentions["att_patches_to_genomics"] = att_patches_to_genomics.detach() if att_patches_to_genomics is not None else None
             XA_attentions["att_patches_to_cnv"] =  att_patches_to_cnv.detach() if att_patches_to_cnv is not None else None
             
             # x = self.patches_FF(patch_embeddings)
             # patch_embeddings = patch_embeddings + x
             
-            keys = self.W_k(patch_embeddings)
-            # keys = self.W_k(patch_embeddings_updated)
+            # keys = self.W_k(patch_embeddings)
+            keys = self.W_k(patch_embeddings_updated)
             scores = torch.matmul(latent_queries, keys.transpose(1, 2))
             scores /= torch.sqrt(torch.tensor(keys.size(-1)).float())
             scores = gate.transpose(-1,-2) * scores # scores + log(gate+eps)
             scores = self.wsi_dropout(scores)
             A_out = scores
             scores = F.softmax(scores, dim=-1)
-            latent = torch.matmul(scores, patch_embeddings)
-            # latent = torch.matmul(scores,patch_embeddings_updated)
+            # latent = torch.matmul(scores, patch_embeddings)
+            latent = torch.matmul(scores,patch_embeddings_updated)
             latent = latent.flatten(start_dim=1)
 
             #Extract high level features

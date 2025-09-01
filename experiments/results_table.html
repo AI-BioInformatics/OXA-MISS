@@ -1,0 +1,696 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lettore CSV Vue.js</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/vue/3.3.4/vue.global.min.js"></script>
+  <style>
+    :root {
+      --primary-color: #4361ee;
+      --secondary-color: #3f37c9;
+      --background-color: #f8f9fa;
+      --text-color: #212529;
+      --border-color: #dee2e6;
+      --hover-color: #e9ecef;
+    }
+    
+    body {
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      margin: 0;
+      padding: 0;
+      background-color: var(--background-color);
+      color: var(--text-color);
+    }
+    
+    .container {
+      max-width: 90%;
+      margin: 0 auto;
+      padding: 2rem;
+    }
+    
+    h1 {
+      color: var(--primary-color);
+      margin-bottom: 1.5rem;
+      text-align: center;
+    }
+    
+    .file-upload {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      margin-bottom: 2rem;
+      padding: 1.5rem;
+      border-radius: 8px;
+      background-color: white;
+      box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+    }
+    
+    .file-input-wrapper {
+      position: relative;
+      margin-bottom: 1rem;
+      width: 100%;
+      max-width: 400px;
+    }
+    
+    .file-input {
+      opacity: 0;
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      cursor: pointer;
+    }
+    
+    .file-input-label {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0.75rem 1.5rem;
+      background-color: var(--primary-color);
+      color: white;
+      border-radius: 4px;
+      font-weight: 500;
+      transition: background-color 0.3s;
+      cursor: pointer;
+      width: 100%;
+    }
+    
+    .file-input-label:hover {
+      background-color: var(--secondary-color);
+    }
+    
+    .selected-file {
+      margin-top: 0.5rem;
+      font-size: 0.9rem;
+    }
+    
+    .filters-container {
+      margin-bottom: 1.5rem;
+      padding: 1rem;
+      background-color: white;
+      border-radius: 8px;
+      box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+    }
+    
+    .search-filter {
+      margin-bottom: 1rem;
+      width: 100%;
+    }
+    
+    .search-input {
+      width: 80%;
+      padding: 0.75rem;
+      border: 1px solid var(--border-color);
+      border-radius: 4px;
+      font-size: 1rem;
+    }
+    
+    .column-selector {
+      margin-top: 1rem;
+    }
+    
+    .column-selector-title {
+      font-weight: 500;
+      margin-bottom: 0.5rem;
+      font-size: 0.9rem;
+      color: var(--text-color);
+    }
+    
+    .checkbox-group {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem 1rem;
+      align-items: center;
+    }
+    
+    .checkbox-item {
+      display: flex;
+      align-items: center;
+      margin-right: 0.5rem;
+      margin-bottom: 0.5rem;
+    }
+    
+    .checkbox-item input {
+      margin-right: 0.25rem;
+    }
+    
+    .checkbox-label {
+      font-size: 0.9rem;
+      cursor: pointer;
+    }
+    
+    .selector-buttons {
+      display: flex;
+      gap: 0.5rem;
+      margin-top: 0.5rem;
+    }
+    
+    .selector-btn {
+      font-size: 0.8rem;
+      padding: 0.25rem 0.5rem;
+      background-color: var(--background-color);
+      border: 1px solid var(--border-color);
+      border-radius: 4px;
+      cursor: pointer;
+      transition: background-color 0.2s;
+    }
+    
+    .selector-btn:hover {
+      background-color: var(--hover-color);
+    }
+    
+    .table-container {
+      overflow-x: auto;
+      border-radius: 8px;
+      box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+    }
+    
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      background-color: white;
+    }
+    
+    th, td {
+      padding: 0.75rem 1rem;
+      text-align: left;
+      border-bottom: 1px solid var(--border-color);
+    }
+    
+    th {
+      background-color: var(--primary-color);
+      color: white;
+      font-weight: 500;
+      position: sticky;
+      top: 0;
+      cursor: pointer;
+      user-select: none;
+      transition: background-color 0.2s;
+    }
+
+    /* ############################################################################### */
+    /* prima colonna fissa */
+    th:first-child, td:first-child {
+        position: sticky;
+        left: 0;
+        /*background-color: white; /* Mantiene visibile la colonna fissa */
+        z-index: 2; /* Assicura che la colonna rimanga sopra */
+    }
+
+    td:first-child{
+      background-color: rgb(194, 194, 194);
+    }
+
+    th:first-child {
+        z-index: 3; /* Il titolo della colonna sopra alle altre celle */
+    }
+    /* ############################################################################### */
+    
+    th:hover {
+      background-color: var(--secondary-color);
+    }
+    
+    .sort-icon {
+      display: inline-block;
+      margin-left: 5px;
+      font-size: 0.8rem;
+    }
+    
+    tr:hover {
+      background-color: var(--hover-color);
+    }
+    
+    .pagination {
+      display: flex;
+      justify-content: center;
+      margin-top: 1rem;
+      gap: 0.5rem;
+    }
+    
+    .pagination-button {
+      padding: 0.5rem 1rem;
+      background-color: white;
+      border: 1px solid var(--border-color);
+      border-radius: 4px;
+      cursor: pointer;
+      transition: background-color 0.3s;
+    }
+    
+    .pagination-button:hover, .pagination-button.active {
+      background-color: var(--primary-color);
+      color: white;
+    }
+    
+    .error-message {
+      color: #e63946;
+      text-align: center;
+      margin: 1rem 0;
+    }
+    
+    .no-data {
+      text-align: center;
+      padding: 2rem;
+      background-color: white;
+      border-radius: 8px;
+    }
+    
+    @media (max-width: 768px) {
+      .container {
+        padding: 1rem;
+      }
+      
+      th, td {
+        padding: 0.5rem;
+      }
+      
+      .checkbox-group {
+        flex-direction: column;
+        align-items: flex-start;
+      }
+      
+      .checkbox-item {
+        margin-bottom: 0.25rem;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <div class="container">
+      <h1>Lettore CSV e Visualizzatore</h1>
+      
+      <div class="file-upload">
+        <div class="file-input-wrapper">
+          <label class="file-input-label">
+            Seleziona un file CSV
+            <input 
+              type="file" 
+              accept=".csv" 
+              class="file-input" 
+              @change="handleFileUpload"
+            >
+          </label>
+        </div>
+        <div class="selected-file" v-if="fileName">
+          File selezionato: {{ fileName }}
+        </div>
+      </div>
+      
+      <div class="filters-container" v-if="headers.length > 0">
+        <div class="search-filter">
+          <input 
+            type="text" 
+            class="search-input" 
+            v-model="searchQuery" 
+            placeholder="Cerca..."
+          >
+        </div>
+        
+        <div class="column-selector">
+          <div class="column-selector-title">Seleziona colonne da visualizzare:</div>
+          <div class="checkbox-group">
+            <div 
+              v-for="(header, index) in headers" 
+              :key="index"
+              class="checkbox-item"
+            >
+              <input 
+                type="checkbox" 
+                :id="'col-'+index" 
+                v-model="visibleColumns[index]"
+              >
+              <label :for="'col-'+index" class="checkbox-label">{{ header }}</label>
+            </div>
+          </div>
+          <div class="selector-buttons">
+            <button 
+              class="selector-btn" 
+              @click="selectAllColumns"
+            >
+              Seleziona tutti
+            </button>
+            <button 
+              class="selector-btn" 
+              @click="deselectAllColumns"
+            >
+              Deseleziona tutti
+            </button>
+          </div>
+        </div>
+      </div>
+      
+      <div class="error-message" v-if="error">
+        {{ error }}
+      </div>
+      
+      <div v-if="!csvData.length && !error" class="no-data">
+        Carica un file CSV per visualizzare i dati
+      </div>
+      
+      <div class="table-container" v-if="csvData.length > 0">
+        <table>
+          <thead>
+            <tr>
+              <th 
+                v-for="(header, index) in filteredHeaders" 
+                :key="index"
+                @click="sortBy(headerToOriginalIndex[index])"
+              >
+                {{ header }}
+                <span class="sort-icon" v-if="sortColumn === headerToOriginalIndex[index]">
+                  {{ sortDirection === 'asc' ? '▲' : '▼' }}
+                </span>
+              </th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="(row, rowIndex) in paginatedData" :key="rowIndex">
+              <td v-for="(colIndex, dataIndex) in visibleColumnsIndices" :key="dataIndex">
+                {{ row[colIndex] }}
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      
+      <div class="pagination" v-if="totalPages > 1">
+        <button 
+          class="pagination-button" 
+          @click="currentPage = 1" 
+          :disabled="currentPage === 1"
+        >
+          &laquo;
+        </button>
+        <button 
+          class="pagination-button" 
+          @click="currentPage--" 
+          :disabled="currentPage === 1"
+        >
+          &lt;
+        </button>
+        <button 
+          v-for="page in paginationPages" 
+          :key="page" 
+          @click="currentPage = page" 
+          class="pagination-button" 
+          :class="{ active: currentPage === page }"
+        >
+          {{ page }}
+        </button>
+        <button 
+          class="pagination-button" 
+          @click="currentPage++" 
+          :disabled="currentPage === totalPages"
+        >
+          &gt;
+        </button>
+        <button 
+          class="pagination-button" 
+          @click="currentPage = totalPages" 
+          :disabled="currentPage === totalPages"
+        >
+          &raquo;
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const { createApp, ref, computed, watch } = Vue;
+    
+    createApp({
+      setup() {
+        const csvData = ref([]);
+        const headers = ref([]);
+        const fileName = ref('');
+        const error = ref('');
+        const searchQuery = ref('');
+        const currentPage = ref(1);
+        const itemsPerPage = ref(10);
+        const sortColumn = ref(null);
+        const sortDirection = ref('asc');
+        const visibleColumns = ref([]);
+        
+        // Memorizza gli indici originali delle colonne visibili
+        const visibleColumnsIndices = computed(() => {
+          return visibleColumns.value
+            .map((isVisible, index) => isVisible ? index : null)
+            .filter(index => index !== null);
+        });
+        
+        // Filtra gli header in base alle colonne visibili
+        const filteredHeaders = computed(() => {
+          return headers.value.filter((_, index) => visibleColumns.value[index]);
+        });
+        
+        // Mappa l'indice dell'header filtrato all'indice originale
+        const headerToOriginalIndex = computed(() => {
+          const map = [];
+          let filteredIndex = 0;
+          
+          for (let i = 0; i < headers.value.length; i++) {
+            if (visibleColumns.value[i]) {
+              map[filteredIndex] = i;
+              filteredIndex++;
+            }
+          }
+          
+          return map;
+        });
+        
+        // Seleziona tutte le colonne
+        const selectAllColumns = () => {
+          visibleColumns.value = headers.value.map(() => true);
+        };
+        
+        // Deseleziona tutte le colonne
+        const deselectAllColumns = () => {
+          visibleColumns.value = headers.value.map(() => false);
+        };
+        
+        const handleFileUpload = (event) => {
+          const file = event.target.files[0];
+          if (!file) return;
+          
+          fileName.value = file.name;
+          
+          if (file.type !== 'text/csv' && !file.name.endsWith('.csv')) {
+            error.value = 'Per favore seleziona un file CSV valido';
+            return;
+          }
+          
+          const reader = new FileReader();
+          
+          reader.onload = (e) => {
+            try {
+              const content = e.target.result;
+              parseCSV(content);
+              error.value = '';
+              // Reset sort state
+              sortColumn.value = null;
+              sortDirection.value = 'asc';
+              // Inizializza visibleColumns con tutte le colonne selezionate
+              visibleColumns.value = headers.value.map(() => true);
+            } catch (err) {
+              error.value = 'Errore nella lettura del file: ' + err.message;
+              csvData.value = [];
+              headers.value = [];
+              visibleColumns.value = [];
+            }
+          };
+          
+          reader.onerror = () => {
+            error.value = 'Errore nella lettura del file';
+          };
+          
+          reader.readAsText(file);
+        };
+        
+        const parseCSV = (content) => {
+          // Semplice parsing CSV
+          const rows = content.split('\n');
+          if (rows.length === 0) {
+            throw new Error('Il file CSV è vuoto');
+          }
+          
+          // Gestisce le virgolette nei campi CSV
+          const parseRow = (row) => {
+            const result = [];
+            let inQuotes = false;
+            let currentValue = '';
+            
+            for (let i = 0; i < row.length; i++) {
+              const char = row[i];
+              
+              if (char === '"' && (i === 0 || row[i-1] !== '\\')) {
+                inQuotes = !inQuotes;
+              } else if (char === ',' && !inQuotes) {
+                result.push(currentValue.trim());
+                currentValue = '';
+              } else {
+                currentValue += char;
+              }
+            }
+            
+            // Aggiungi l'ultimo valore
+            if (currentValue) {
+              result.push(currentValue.trim());
+            }
+            
+            return result;
+          };
+          
+          // Estrai gli header e i dati
+          headers.value = parseRow(rows[0]);
+          csvData.value = [];
+          
+          for (let i = 1; i < rows.length; i++) {
+            if (rows[i].trim()) {
+              const rowData = parseRow(rows[i]);
+              if (rowData.length === headers.value.length) {
+                csvData.value.push(rowData);
+              }
+            }
+          }
+        };
+        
+        // Funzione per determinare se una stringa è un numero
+        const isNumeric = (str) => {
+          if (typeof str !== 'string') return false;
+          return !isNaN(str) && !isNaN(parseFloat(str));
+        };
+        
+        // Funzione per ordinare i dati
+        const sortBy = (columnIndex) => {
+          if (sortColumn.value === columnIndex) {
+            // Cambia direzione se la colonna è già selezionata
+            sortDirection.value = sortDirection.value === 'asc' ? 'desc' : 'asc';
+          } else {
+            // Nuova colonna selezionata, default a 'asc'
+            sortColumn.value = columnIndex;
+            sortDirection.value = 'asc';
+          }
+          
+          // Reset pagina
+          currentPage.value = 1;
+        };
+        
+
+        const sortedData = computed(() => {
+          if (sortColumn.value === null) return csvData.value;
+
+          return [...csvData.value].sort((a, b) => {
+            const aValue = a[sortColumn.value];
+            const bValue = b[sortColumn.value];
+
+            // Funzione per verificare se una stringa è nel formato ISO 8601
+            const isISODate = (value) => 
+              typeof value === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}.\d{3}Z$/.test(value);
+
+            if (isNumeric(aValue) && isNumeric(bValue)) {
+              // Ordinamento numerico
+              const aNum = parseFloat(aValue);
+              const bNum = parseFloat(bValue);
+              return sortDirection.value === 'asc' ? aNum - bNum : bNum - aNum;
+            } else if (isISODate(aValue) && isISODate(bValue)) {
+              // Ordinamento cronologico per date
+              const aDate = new Date(aValue);
+              const bDate = new Date(bValue);
+              return sortDirection.value === 'asc' ? aDate - bDate : bDate - aDate;
+            } else {
+              // Ordinamento alfabetico per stringhe
+              return sortDirection.value === 'asc' 
+                ? aValue.localeCompare(bValue) 
+                : bValue.localeCompare(aValue);
+            }
+          });
+        });
+        
+        // Filtra i dati in base alla ricerca
+        const filteredData = computed(() => {
+          if (!searchQuery.value) return sortedData.value;
+          
+          const query = searchQuery.value.toLowerCase();
+          return sortedData.value.filter(row => 
+            row.some(cell => 
+              cell.toLowerCase().includes(query)
+            )
+          );
+        });
+        
+        // Calcola il numero totale di pagine
+        const totalPages = computed(() => 
+          Math.max(1, Math.ceil(filteredData.value.length / itemsPerPage.value))
+        );
+        
+        // Calcola le pagine da mostrare nella paginazione
+        const paginationPages = computed(() => {
+          const range = [];
+          const maxVisiblePages = 5;
+          
+          if (totalPages.value <= maxVisiblePages) {
+            for (let i = 1; i <= totalPages.value; i++) {
+              range.push(i);
+            }
+          } else {
+            let start = Math.max(1, currentPage.value - Math.floor(maxVisiblePages / 2));
+            let end = start + maxVisiblePages - 1;
+            
+            if (end > totalPages.value) {
+              end = totalPages.value;
+              start = Math.max(1, end - maxVisiblePages + 1);
+            }
+            
+            for (let i = start; i <= end; i++) {
+              range.push(i);
+            }
+          }
+          
+          return range;
+        });
+        
+        // Dati paginati da mostrare
+        const paginatedData = computed(() => {
+          const startIndex = (currentPage.value - 1) * itemsPerPage.value;
+          return filteredData.value.slice(startIndex, startIndex + itemsPerPage.value);
+        });
+        
+        // Resetta la pagina corrente quando cambia la ricerca
+        watch(searchQuery, () => {
+          currentPage.value = 1;
+        });
+        
+        // Resetta la pagina corrente quando cambiano le colonne visibili
+        watch(visibleColumns, () => {
+          currentPage.value = 1;
+        });
+        
+        return {
+          csvData,
+          headers,
+          fileName,
+          error,
+          searchQuery,
+          currentPage,
+          itemsPerPage,
+          totalPages,
+          paginationPages,
+          paginatedData,
+          sortColumn,
+          sortDirection,
+          visibleColumns,
+          visibleColumnsIndices,
+          filteredHeaders,
+          headerToOriginalIndex,
+          handleFileUpload,
+          sortBy,
+          selectAllColumns,
+          deselectAllColumns
+        };
+      }
+    }).mount('#app');
+  </script>
+</body>
+</html>
