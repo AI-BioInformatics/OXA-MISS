@@ -1,0 +1,119 @@
+title: custom_multimodal_XA_MISSING_MOD_RATE_kfold_5_all_tissues
+project_dir: '/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/results'
+seed: 42
+
+wandb:
+  mode: online
+
+data_loader:
+
+  bad_patients: ['8005']
+  missing_modalities_tables: 
+    active: False #False se vogliamo testare il caso completo
+    # missing_mod_rate: genomics_miss_25 #genomics/wsi rates: 0, 0.25, 0.5, 0.75
+    missing_mod_rate: missing_all_30 #rates: 0.3, 0.6 di cui metà per ogni modalità
+
+  # file_genes_group: "/work/H2020DeciderFicarra/D2_4/datasets/DECIDER_cohorts/Gene_expression/Expression/daria_mapped_all_genes.json"
+  file_genes_group: "/work/H2020DeciderFicarra/D2_4/Development/HGCN/HGCN_code/pathways_ensg.json"
+  datasets_configs: ["/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/config/datasets/Decider_dataset_OS_interval_all_tissues.yaml"]
+  task_type: "Survival"
+  max_patches: 4096
+  batch_size: 1
+  real_batch_size: 4
+  n_bins: 4
+  sample: True
+  test_sample: False
+  load_slides_in_RAM: True  
+  label_name: "Survival"
+  censorships_name: "None"
+  eps: 0.000001
+  num_workers: 2
+  train_size: 0.7
+  val_size: 0.15
+  test_size: 0.15
+  random_state: 42
+  preprocessing: /work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/config/preprocessing.yaml
+  augmentation: /work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/config/augmentation.yaml
+  KFold:
+    splits: /work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/utils/splits_train_val_test/NACT_interval
+    # splits: [
+    #   '/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/splits/k_5/Survival/missing_modality/LUAD/splits_2.csv',
+    #   '/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/splits/k_5/Survival/missing_modality/LUAD/splits_4.csv',
+    #   ]
+    internal_val_size: 0.0
+
+missing_modality_test:
+  active: False
+  test_scenarios_on_each_epoch: True
+  scenarios: [
+    # 'genomics_miss_25',
+    # 'missing_all_60'
+  ]  #questi sono gli scenari che voglio testare in test addizionali al test (quindi il caso di train viene testato in ogni caso, e poi vengono aggiunte anche queste prove)
+
+model:
+  name: Custom_Multimodal_XA
+  pretrained: False # False # True
+  save_checkpoints: True
+  kwargs:
+    input_dim: 1024
+    genomics_group_name: [ "tumor_suppression", "oncogenesis","protein_kinases", "cellular_differentiation","cytokines_and_growth"] # ["all_genes"] # ["high_refractory", "high_sensitive", "hypoxia_pathway"]
+    genomics_group_dropout: [0.35] # [0.2, 0, 0.2]
+    cnv_group_name: [ "tumor_suppression", "oncogenesis","protein_kinases", "cellular_differentiation","cytokines_and_growth"] # ["all_genes"]  # ["high_refractory", "high_sensitive", "hypoxia_pathway"]
+    # cnv_group_name: ["high_refractory", "high_sensitive", "hypoxia_pathway"]
+    cnv_group_dropout: [0.2] # oppure -> [0.2, 0.2, 0.2]
+    inner_dim: 128
+    num_latent_queries: 1
+    wsi_dropout: 0.0
+    use_layernorm: False
+    dropout: 0.5 # 0.5
+    output_dim: 4
+    input_modalities: ["WSI", "Genomics"] # ["WSI", "Genomics", "CNV"]
+
+    use_WSI_level_embs: False # False True 
+    WSI_level_embs_fusion_type: "concat" # sum | concat
+    WSI_level_encoder_dropout: 0.2
+    WSI_level_encoder_sizes: [768, 40, 3]
+    WSI_level_encoder_LayerNorm: False # False True 
+  device: cuda
+
+# loss:
+#   name: CrossEntropyLoss
+#   kwargs:
+#     label_smoothing: 0.0
+#     reduction: 'mean'
+#     weight: [2, 1]
+
+# Survival Loss
+loss:
+  name: NLLSurvLoss
+  kwargs:
+    alpha: 0.0
+    eps: 0.0000001
+    reduction: 'mean'
+
+scheduler:
+  batch_step: False
+  name: MultiStepLR
+  milestones: [10]
+  gamma: 0.2
+  pct_start: 0.1
+  steps_per_epoch: 1
+
+optimizer:
+  learning_rate: 0.001
+  name: RAdam
+  weight_decay: 0.0001 # 0 # 0.00005
+  momentum: None
+
+trainer:
+  reload: False
+  checkpoint: ''
+  do_train: False
+  do_test: False
+  do_inference: False
+  do_kfold: True
+  epochs: 20
+  patience: 20
+  AEM_lamda: 0.3
+  Save_XA_attention_files: True
+  grid_search_versions_path: /work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/grid_search/models_versions
