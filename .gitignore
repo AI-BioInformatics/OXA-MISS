@@ -195,3 +195,8 @@ splits/TITAN*
 
 stats/patches_all_tissues.txt
 stats/patches.txt
+utils/create_missingmodalitiestables_chemorefractory.py
+utils/missing_mod/chemorefractory_missing_modality_table.csv
+utils/missing_mod/NACT_interval_missing_modality_table.csv
+utils/missing_mod/NACT_interval_PFI_cohort_missing_modality_table.csv
+utils/missing_mod/NACT_primary_missing_modality_table.csv
