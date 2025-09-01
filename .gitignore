@@ -185,4 +185,7 @@ titans_req_filtered.txt
 experiments/test_results_csv/*
 dataloader/dataset/*
 titans_req_filtered.txt
+demo/*old*
+main_dev.py
+
 
