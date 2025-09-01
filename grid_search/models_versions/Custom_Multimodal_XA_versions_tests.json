@@ -1,0 +1,396 @@
+[
+    {
+        "title": "custom_multimodal_XA_BLCA_kfold_5_all_tissues",
+        "project_dir": "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/results",
+        "seed": 43,
+        "wandb": {
+            "mode": "online"
+        },
+        "data_loader": {
+            "missing_modalities_tables": {
+                "active": true,
+                "missing_mod_rate": "missing_all_30"
+            },
+            "file_genes_group": "/work/H2020DeciderFicarra/D2_4/Development/HGCN/HGCN_code/pathways_ensg.json",
+            "datasets_configs": [
+                "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/config/datasets/TCGA_BLCA_dataset.yaml"
+            ],
+            "task_type": "Survival",
+            "max_patches": 4096,
+            "batch_size": 1,
+            "real_batch_size": 4,
+            "n_bins": 4,
+            "sample": true,
+            "test_sample": false,
+            "load_slides_in_RAM": true,
+            "label_name": "Survival",
+            "censorships_name": "None",
+            "eps": 1e-06,
+            "num_workers": 2,
+            "train_size": 0.7,
+            "val_size": 0.15,
+            "test_size": 0.15,
+            "random_state": 42,
+            "preprocessing": "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/config/preprocessing.yaml",
+            "augmentation": "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/config/augmentation.yaml",
+            "KFold": {
+                "splits": "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/utils/splits_train_val_test/BLCA",
+                "internal_val_size": 0.0
+            }
+        },
+        "missing_modality_test": {
+            "active": true,
+            "test_scenarios_on_each_epoch": true,
+            "scenarios": [
+                "wsi_miss_100"
+            ]
+        },
+        "model": {
+            "name": "Custom_Multimodal_XA",
+            "pretrained": false,
+            "save_checkpoints": true,
+            "kwargs": {
+                "input_dim": 1024,
+                "genomics_group_name": [
+                    "tumor_suppression",
+                    "oncogenesis",
+                    "protein_kinases",
+                    "cellular_differentiation",
+                    "cytokines_and_growth"
+                ],
+                "genomics_group_dropout": [
+                    0.35
+                ],
+                "cnv_group_name": [
+                    "tumor_suppression",
+                    "oncogenesis",
+                    "protein_kinases",
+                    "cellular_differentiation",
+                    "cytokines_and_growth"
+                ],
+                "cnv_group_dropout": [
+                    0.2
+                ],
+                "inner_dim": 128,
+                "num_latent_queries": 1,
+                "wsi_dropout": 0.0,
+                "use_layernorm": false,
+                "dropout": 0.5,
+                "output_dim": 4,
+                "input_modalities": [
+                    "WSI",
+                    "Genomics"
+                ],
+                "use_WSI_level_embs": false,
+                "WSI_level_embs_fusion_type": "concat",
+                "WSI_level_encoder_dropout": 0.2,
+                "WSI_level_encoder_sizes": [
+                    768,
+                    40,
+                    3
+                ],
+                "WSI_level_encoder_LayerNorm": false
+            }
+        },
+        "loss": {
+            "name": "NLLSurvLoss",
+            "kwargs": {
+                "alpha": 0.0,
+                "eps": 1e-07,
+                "reduction": "mean"
+            }
+        },
+        "scheduler": {
+            "batch_step": false,
+            "name": "MultiStepLR",
+            "milestones": [
+                10
+            ],
+            "gamma": 0.2,
+            "pct_start": 0.1,
+            "steps_per_epoch": 1
+        },
+        "optimizer": {
+            "learning_rate": 0.0001,
+            "name": "RAdam",
+            "weight_decay": 0.0001,
+            "momentum": null
+        },
+        "trainer": {
+            "reload": false,
+            "checkpoint": "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/results/custom_multimodal_XA_BLCA_kfold_5_all_tissues_YY2025-MM05-DD20-HH11-MM48_7A8D02E102",
+            "do_train": false,
+            "do_test": true,
+            "do_inference": false,
+            "do_kfold": false,
+            "epochs": 20,
+            "patience": 20,
+            "AEM_lamda": 0.3,
+            "Save_XA_attention_files": true
+        }
+    },
+    {
+        "title": "custom_multimodal_XA_BLCA_kfold_5_all_tissues",
+        "project_dir": "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/results",
+        "seed": 45,
+        "wandb": {
+            "mode": "online"
+        },
+        "data_loader": {
+            "missing_modalities_tables": {
+                "active": true,
+                "missing_mod_rate": "missing_all_60"
+            },
+            "file_genes_group": "/work/H2020DeciderFicarra/D2_4/Development/HGCN/HGCN_code/pathways_ensg.json",
+            "datasets_configs": [
+                "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/config/datasets/TCGA_BLCA_dataset.yaml"
+            ],
+            "task_type": "Survival",
+            "max_patches": 4096,
+            "batch_size": 1,
+            "real_batch_size": 4,
+            "n_bins": 4,
+            "sample": true,
+            "test_sample": false,
+            "load_slides_in_RAM": true,
+            "label_name": "Survival",
+            "censorships_name": "None",
+            "eps": 1e-06,
+            "num_workers": 2,
+            "train_size": 0.7,
+            "val_size": 0.15,
+            "test_size": 0.15,
+            "random_state": 42,
+            "preprocessing": "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/config/preprocessing.yaml",
+            "augmentation": "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/config/augmentation.yaml",
+            "KFold": {
+                "splits": "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/utils/splits_train_val_test/BLCA",
+                "internal_val_size": 0.0
+            }
+        },
+        "missing_modality_test": {
+            "active": true,
+            "test_scenarios_on_each_epoch": true,
+            "scenarios": [
+
+                "genomics_miss_50"
+
+            ]
+        },
+        "model": {
+            "name": "Custom_Multimodal_XA",
+            "pretrained": false,
+            "save_checkpoints": true,
+            "kwargs": {
+                "input_dim": 1024,
+                "genomics_group_name": [
+                    "tumor_suppression",
+                    "oncogenesis",
+                    "protein_kinases",
+                    "cellular_differentiation",
+                    "cytokines_and_growth"
+                ],
+                "genomics_group_dropout": [
+                    0.35
+                ],
+                "cnv_group_name": [
+                    "tumor_suppression",
+                    "oncogenesis",
+                    "protein_kinases",
+                    "cellular_differentiation",
+                    "cytokines_and_growth"
+                ],
+                "cnv_group_dropout": [
+                    0.2
+                ],
+                "inner_dim": 128,
+                "num_latent_queries": 1,
+                "wsi_dropout": 0.0,
+                "use_layernorm": false,
+                "dropout": 0.5,
+                "output_dim": 4,
+                "input_modalities": [
+                    "WSI",
+                    "Genomics"
+                ],
+                "use_WSI_level_embs": false,
+                "WSI_level_embs_fusion_type": "concat",
+                "WSI_level_encoder_dropout": 0.2,
+                "WSI_level_encoder_sizes": [
+                    768,
+                    40,
+                    3
+                ],
+                "WSI_level_encoder_LayerNorm": false
+            }
+        },
+        "loss": {
+            "name": "NLLSurvLoss",
+            "kwargs": {
+                "alpha": 0.0,
+                "eps": 1e-07,
+                "reduction": "mean"
+            }
+        },
+        "scheduler": {
+            "batch_step": false,
+            "name": "MultiStepLR",
+            "milestones": [
+                10
+            ],
+            "gamma": 0.2,
+            "pct_start": 0.1,
+            "steps_per_epoch": 1
+        },
+        "optimizer": {
+            "learning_rate": 0.0001,
+            "name": "RAdam",
+            "weight_decay": 0.0001,
+            "momentum": null
+        },
+        "trainer": {
+            "reload": false,
+            "checkpoint": "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/results/custom_multimodal_XA_BLCA_kfold_5_all_tissues_YY2025-MM05-DD28-HH06-MM53_B46BDF42E2",
+            "do_train": false,
+            "do_test": true,
+            "do_inference": false,
+            "do_kfold": false,
+            "epochs": 20,
+            "patience": 20,
+            "AEM_lamda": 0.3,
+            "Save_XA_attention_files": true
+        }
+    },
+    {
+        "title": "custom_multimodal_XA_KIRP_kfold_5_all_tissues",
+        "project_dir": "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/results",
+        "seed": 44,
+        "wandb": {
+            "mode": "online"
+        },
+        "data_loader": {
+            "missing_modalities_tables": {
+                "active": true,
+                "missing_mod_rate": "missing_all_30"
+            },
+            "file_genes_group": "/work/H2020DeciderFicarra/D2_4/Development/HGCN/HGCN_code/pathways_ensg.json",
+            "datasets_configs": [
+                "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/config/datasets/TCGA_KIRP_dataset.yaml"
+            ],
+            "task_type": "Survival",
+            "max_patches": 4096,
+            "batch_size": 1,
+            "real_batch_size": 4,
+            "n_bins": 4,
+            "sample": true,
+            "test_sample": false,
+            "load_slides_in_RAM": true,
+            "label_name": "Survival",
+            "censorships_name": "None",
+            "eps": 1e-06,
+            "num_workers": 2,
+            "train_size": 0.7,
+            "val_size": 0.15,
+            "test_size": 0.15,
+            "random_state": 42,
+            "preprocessing": "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/config/preprocessing.yaml",
+            "augmentation": "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/config/augmentation.yaml",
+            "KFold": {
+                "splits": "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/utils/splits_train_val_test/KIRP",
+                "internal_val_size": 0.0
+            }
+        },
+        "missing_modality_test": {
+            "active": true,
+            "test_scenarios_on_each_epoch": true,
+            "scenarios": [
+
+                "genomics_miss_50"
+
+            ]
+        },
+        "model": {
+            "name": "Custom_Multimodal_XA",
+            "pretrained": false,
+            "save_checkpoints": true,
+            "kwargs": {
+                "input_dim": 1024,
+                "genomics_group_name": [
+                    "tumor_suppression",
+                    "oncogenesis",
+                    "protein_kinases",
+                    "cellular_differentiation",
+                    "cytokines_and_growth"
+                ],
+                "genomics_group_dropout": [
+                    0.35
+                ],
+                "cnv_group_name": [
+                    "tumor_suppression",
+                    "oncogenesis",
+                    "protein_kinases",
+                    "cellular_differentiation",
+                    "cytokines_and_growth"
+                ],
+                "cnv_group_dropout": [
+                    0.2
+                ],
+                "inner_dim": 128,
+                "num_latent_queries": 1,
+                "wsi_dropout": 0.0,
+                "use_layernorm": false,
+                "dropout": 0.5,
+                "output_dim": 4,
+                "input_modalities": [
+                    "WSI",
+                    "Genomics"
+                ],
+                "use_WSI_level_embs": false,
+                "WSI_level_embs_fusion_type": "concat",
+                "WSI_level_encoder_dropout": 0.2,
+                "WSI_level_encoder_sizes": [
+                    768,
+                    40,
+                    3
+                ],
+                "WSI_level_encoder_LayerNorm": false
+            }
+        },
+        "loss": {
+            "name": "NLLSurvLoss",
+            "kwargs": {
+                "alpha": 0.0,
+                "eps": 1e-07,
+                "reduction": "mean"
+            }
+        },
+        "scheduler": {
+            "batch_step": false,
+            "name": "MultiStepLR",
+            "milestones": [
+                10
+            ],
+            "gamma": 0.2,
+            "pct_start": 0.1,
+            "steps_per_epoch": 1
+        },
+        "optimizer": {
+            "learning_rate": 0.0001,
+            "name": "RAdam",
+            "weight_decay": 0.0001,
+            "momentum": null
+        },
+        "trainer": {
+            "reload": false,
+            "checkpoint": "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/results/custom_multimodal_XA_KIRP_kfold_5_all_tissues_YY2025-MM05-DD29-HH00-MM17_A009BA21E0",
+            "do_train": false,
+            "do_test": true,
+            "do_inference": false,
+            "do_kfold": false,
+            "epochs": 20,
+            "patience": 20,
+            "AEM_lamda": 0.3,
+            "Save_XA_attention_files": true
+        }
+    }
+]

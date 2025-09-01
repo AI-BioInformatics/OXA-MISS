@@ -1,0 +1,1172 @@
+[
+    {
+        "title": "ProSurv_augtrain_OV",
+        "project_dir": "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/results",
+        "seed": 43,
+        "wandb": {
+            "mode": "online",
+            "project": "augmented_training"
+        },
+        "data_loader": {
+            "missing_modalities_tables": {
+                "active": true,
+                "missing_mod_rate": "complete"
+            },
+            "file_genes_group": "/work/H2020DeciderFicarra/D2_4/Development/HGCN/HGCN_code/pathways_ensg.json",
+            "datasets_configs": [
+                "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/config/datasets/TCGA_OV_dataset.yaml"
+            ],
+            "task_type": "Survival",
+            "max_patches": 4096,
+            "batch_size": 1,
+            "real_batch_size": 4,
+            "n_bins": 4,
+            "sample": true,
+            "test_sample": false,
+            "load_slides_in_RAM": true,
+            "label_name": "Survival",
+            "censorships_name": "None",
+            "eps": 1e-06,
+            "num_workers": 2,
+            "train_size": 0.7,
+            "val_size": 0.15,
+            "test_size": 0.15,
+            "random_state": 42,
+            "preprocessing": "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/config/preprocessing.yaml",
+            "augmentation": "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/config/augmentation.yaml",
+            "KFold": {
+                "splits": "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/splits/splits_train_val_test/OV",
+                "internal_val_size": 0.0
+            },
+            "missing_modality_table": "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/splits/aug_missing_mod/OV_missing_modality_table.csv"
+        },
+        "missing_modality_test": {
+            "active": true,
+            "test_scenarios_on_each_epoch": true,
+            "scenarios": [
+                "genomics_miss_25",
+                "genomics_miss_100",
+                "wsi_miss_100",
+                "genomics_miss_50",
+                "genomics_miss_75",
+                "wsi_miss_25",
+                "wsi_miss_50",
+                "wsi_miss_75"
+            ]
+        },
+        "model": {
+            "name": "ProSurv",
+            "pretrained": false,
+            "save_checkpoints": true,
+            "kwargs": {
+                "genomics_group_name": [
+                    "tumor_suppression",
+                    "oncogenesis",
+                    "protein_kinases",
+                    "cellular_differentiation",
+                    "cytokines_and_growth"
+                ],
+                "cnv_group_name": [
+                    "tumor_suppression",
+                    "oncogenesis",
+                    "protein_kinases",
+                    "cellular_differentiation",
+                    "cytokines_and_growth"
+                ],
+                "input_modalities": [
+                    "WSI",
+                    "Genomics"
+                ]
+            }
+        },
+        "loss": {
+            "name": "NLLSurvLoss",
+            "kwargs": {
+                "alpha": 0.0,
+                "eps": 1e-07,
+                "reduction": "mean"
+            }
+        },
+        "scheduler": {
+            "batch_step": false,
+            "name": "MultiStepLR",
+            "milestones": [
+                10
+            ],
+            "gamma": 0.2,
+            "pct_start": 0.1,
+            "steps_per_epoch": 1
+        },
+        "optimizer": {
+            "learning_rate": 0.0001,
+            "name": "RAdam",
+            "weight_decay": 0.0001,
+            "momentum": null
+        },
+        "trainer": {
+            "reload": false,
+            "checkpoint": "",
+            "do_train": false,
+            "do_test": false,
+            "do_inference": false,
+            "do_kfold": true,
+            "epochs": 50,
+            "patience": 50,
+            "AEM_lamda": 0.3,
+            "Save_XA_attention_files": true
+        }
+    },
+    {
+        "title": "ProSurv_augtrain_OV",
+        "project_dir": "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/results",
+        "seed": 43,
+        "wandb": {
+            "mode": "online",
+            "project": "augmented_training"
+        },
+        "data_loader": {
+            "missing_modalities_tables": {
+                "active": true,
+                "missing_mod_rate": "complete"
+            },
+            "file_genes_group": "/work/H2020DeciderFicarra/D2_4/Development/HGCN/HGCN_code/pathways_ensg.json",
+            "datasets_configs": [
+                "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/config/datasets/TCGA_OV_dataset.yaml"
+            ],
+            "task_type": "Survival",
+            "max_patches": 4096,
+            "batch_size": 1,
+            "real_batch_size": 4,
+            "n_bins": 4,
+            "sample": true,
+            "test_sample": false,
+            "load_slides_in_RAM": true,
+            "label_name": "Survival",
+            "censorships_name": "None",
+            "eps": 1e-06,
+            "num_workers": 2,
+            "train_size": 0.7,
+            "val_size": 0.15,
+            "test_size": 0.15,
+            "random_state": 42,
+            "preprocessing": "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/config/preprocessing.yaml",
+            "augmentation": "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/config/augmentation.yaml",
+            "KFold": {
+                "splits": "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/splits/aug_splits_train_val_test/OV",
+                "internal_val_size": 0.0
+            },
+            "missing_modality_table": "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/splits/aug_missing_mod/OV_missing_modality_table.csv"
+        },
+        "missing_modality_test": {
+            "active": true,
+            "test_scenarios_on_each_epoch": true,
+            "scenarios": [
+                "genomics_miss_25",
+                "genomics_miss_100",
+                "wsi_miss_100",
+                "genomics_miss_50",
+                "genomics_miss_75",
+                "wsi_miss_25",
+                "wsi_miss_50",
+                "wsi_miss_75"
+            ]
+        },
+        "model": {
+            "name": "ProSurv",
+            "pretrained": false,
+            "save_checkpoints": true,
+            "kwargs": {
+                "genomics_group_name": [
+                    "tumor_suppression",
+                    "oncogenesis",
+                    "protein_kinases",
+                    "cellular_differentiation",
+                    "cytokines_and_growth"
+                ],
+                "cnv_group_name": [
+                    "tumor_suppression",
+                    "oncogenesis",
+                    "protein_kinases",
+                    "cellular_differentiation",
+                    "cytokines_and_growth"
+                ],
+                "input_modalities": [
+                    "WSI",
+                    "Genomics"
+                ]
+            }
+        },
+        "loss": {
+            "name": "NLLSurvLoss",
+            "kwargs": {
+                "alpha": 0.0,
+                "eps": 1e-07,
+                "reduction": "mean"
+            }
+        },
+        "scheduler": {
+            "batch_step": false,
+            "name": "MultiStepLR",
+            "milestones": [
+                10
+            ],
+            "gamma": 0.2,
+            "pct_start": 0.1,
+            "steps_per_epoch": 1
+        },
+        "optimizer": {
+            "learning_rate": 0.0001,
+            "name": "RAdam",
+            "weight_decay": 0.0001,
+            "momentum": null
+        },
+        "trainer": {
+            "reload": false,
+            "checkpoint": "",
+            "do_train": false,
+            "do_test": false,
+            "do_inference": false,
+            "do_kfold": true,
+            "epochs": 50,
+            "patience": 50,
+            "AEM_lamda": 0.3,
+            "Save_XA_attention_files": true
+        }
+    },
+    {
+        "title": "ProSurv_augtrain_LUAD",
+        "project_dir": "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/results",
+        "seed": 43,
+        "wandb": {
+            "mode": "online",
+            "project": "augmented_training"
+        },
+        "data_loader": {
+            "missing_modalities_tables": {
+                "active": true,
+                "missing_mod_rate": "complete"
+            },
+            "file_genes_group": "/work/H2020DeciderFicarra/D2_4/Development/HGCN/HGCN_code/pathways_ensg.json",
+            "datasets_configs": [
+                "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/config/datasets/TCGA_LUAD_dataset.yaml"
+            ],
+            "task_type": "Survival",
+            "max_patches": 4096,
+            "batch_size": 1,
+            "real_batch_size": 4,
+            "n_bins": 4,
+            "sample": true,
+            "test_sample": false,
+            "load_slides_in_RAM": true,
+            "label_name": "Survival",
+            "censorships_name": "None",
+            "eps": 1e-06,
+            "num_workers": 2,
+            "train_size": 0.7,
+            "val_size": 0.15,
+            "test_size": 0.15,
+            "random_state": 42,
+            "preprocessing": "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/config/preprocessing.yaml",
+            "augmentation": "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/config/augmentation.yaml",
+            "KFold": {
+                "splits": "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/splits/splits_train_val_test/LUAD",
+                "internal_val_size": 0.0
+            },
+            "missing_modality_table": "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/splits/aug_missing_mod/LUAD_missing_modality_table.csv"
+        },
+        "missing_modality_test": {
+            "active": true,
+            "test_scenarios_on_each_epoch": true,
+            "scenarios": [
+                "genomics_miss_25",
+                "genomics_miss_100",
+                "wsi_miss_100",
+                "genomics_miss_50",
+                "genomics_miss_75",
+                "wsi_miss_25",
+                "wsi_miss_50",
+                "wsi_miss_75"
+            ]
+        },
+        "model": {
+            "name": "ProSurv",
+            "pretrained": false,
+            "save_checkpoints": true,
+            "kwargs": {
+                "genomics_group_name": [
+                    "tumor_suppression",
+                    "oncogenesis",
+                    "protein_kinases",
+                    "cellular_differentiation",
+                    "cytokines_and_growth"
+                ],
+                "cnv_group_name": [
+                    "tumor_suppression",
+                    "oncogenesis",
+                    "protein_kinases",
+                    "cellular_differentiation",
+                    "cytokines_and_growth"
+                ],
+                "input_modalities": [
+                    "WSI",
+                    "Genomics"
+                ]
+            }
+        },
+        "loss": {
+            "name": "NLLSurvLoss",
+            "kwargs": {
+                "alpha": 0.0,
+                "eps": 1e-07,
+                "reduction": "mean"
+            }
+        },
+        "scheduler": {
+            "batch_step": false,
+            "name": "MultiStepLR",
+            "milestones": [
+                10
+            ],
+            "gamma": 0.2,
+            "pct_start": 0.1,
+            "steps_per_epoch": 1
+        },
+        "optimizer": {
+            "learning_rate": 0.0001,
+            "name": "RAdam",
+            "weight_decay": 0.0001,
+            "momentum": null
+        },
+        "trainer": {
+            "reload": false,
+            "checkpoint": "",
+            "do_train": false,
+            "do_test": false,
+            "do_inference": false,
+            "do_kfold": true,
+            "epochs": 50,
+            "patience": 50,
+            "AEM_lamda": 0.3,
+            "Save_XA_attention_files": true
+        }
+    },
+    {
+        "title": "ProSurv_augtrain_LUAD",
+        "project_dir": "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/results",
+        "seed": 43,
+        "wandb": {
+            "mode": "online",
+            "project": "augmented_training"
+        },
+        "data_loader": {
+            "missing_modalities_tables": {
+                "active": true,
+                "missing_mod_rate": "complete"
+            },
+            "file_genes_group": "/work/H2020DeciderFicarra/D2_4/Development/HGCN/HGCN_code/pathways_ensg.json",
+            "datasets_configs": [
+                "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/config/datasets/TCGA_LUAD_dataset.yaml"
+            ],
+            "task_type": "Survival",
+            "max_patches": 4096,
+            "batch_size": 1,
+            "real_batch_size": 4,
+            "n_bins": 4,
+            "sample": true,
+            "test_sample": false,
+            "load_slides_in_RAM": true,
+            "label_name": "Survival",
+            "censorships_name": "None",
+            "eps": 1e-06,
+            "num_workers": 2,
+            "train_size": 0.7,
+            "val_size": 0.15,
+            "test_size": 0.15,
+            "random_state": 42,
+            "preprocessing": "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/config/preprocessing.yaml",
+            "augmentation": "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/config/augmentation.yaml",
+            "KFold": {
+                "splits": "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/splits/aug_splits_train_val_test/LUAD",
+                "internal_val_size": 0.0
+            },
+            "missing_modality_table": "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/splits/aug_missing_mod/LUAD_missing_modality_table.csv"
+        },
+        "missing_modality_test": {
+            "active": true,
+            "test_scenarios_on_each_epoch": true,
+            "scenarios": [
+                "genomics_miss_25",
+                "genomics_miss_100",
+                "wsi_miss_100",
+                "genomics_miss_50",
+                "genomics_miss_75",
+                "wsi_miss_25",
+                "wsi_miss_50",
+                "wsi_miss_75"
+            ]
+        },
+        "model": {
+            "name": "ProSurv",
+            "pretrained": false,
+            "save_checkpoints": true,
+            "kwargs": {
+                "genomics_group_name": [
+                    "tumor_suppression",
+                    "oncogenesis",
+                    "protein_kinases",
+                    "cellular_differentiation",
+                    "cytokines_and_growth"
+                ],
+                "cnv_group_name": [
+                    "tumor_suppression",
+                    "oncogenesis",
+                    "protein_kinases",
+                    "cellular_differentiation",
+                    "cytokines_and_growth"
+                ],
+                "input_modalities": [
+                    "WSI",
+                    "Genomics"
+                ]
+            }
+        },
+        "loss": {
+            "name": "NLLSurvLoss",
+            "kwargs": {
+                "alpha": 0.0,
+                "eps": 1e-07,
+                "reduction": "mean"
+            }
+        },
+        "scheduler": {
+            "batch_step": false,
+            "name": "MultiStepLR",
+            "milestones": [
+                10
+            ],
+            "gamma": 0.2,
+            "pct_start": 0.1,
+            "steps_per_epoch": 1
+        },
+        "optimizer": {
+            "learning_rate": 0.0001,
+            "name": "RAdam",
+            "weight_decay": 0.0001,
+            "momentum": null
+        },
+        "trainer": {
+            "reload": false,
+            "checkpoint": "",
+            "do_train": false,
+            "do_test": false,
+            "do_inference": false,
+            "do_kfold": true,
+            "epochs": 50,
+            "patience": 50,
+            "AEM_lamda": 0.3,
+            "Save_XA_attention_files": true
+        }
+    },
+    {
+        "title": "ProSurv_augtrain_HNSC",
+        "project_dir": "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/results",
+        "seed": 43,
+        "wandb": {
+            "mode": "online",
+            "project": "augmented_training"
+        },
+        "data_loader": {
+            "missing_modalities_tables": {
+                "active": true,
+                "missing_mod_rate": "complete"
+            },
+            "file_genes_group": "/work/H2020DeciderFicarra/D2_4/Development/HGCN/HGCN_code/pathways_ensg.json",
+            "datasets_configs": [
+                "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/config/datasets/TCGA_HNSC_dataset.yaml"
+            ],
+            "task_type": "Survival",
+            "max_patches": 4096,
+            "batch_size": 1,
+            "real_batch_size": 4,
+            "n_bins": 4,
+            "sample": true,
+            "test_sample": false,
+            "load_slides_in_RAM": true,
+            "label_name": "Survival",
+            "censorships_name": "None",
+            "eps": 1e-06,
+            "num_workers": 2,
+            "train_size": 0.7,
+            "val_size": 0.15,
+            "test_size": 0.15,
+            "random_state": 42,
+            "preprocessing": "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/config/preprocessing.yaml",
+            "augmentation": "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/config/augmentation.yaml",
+            "KFold": {
+                "splits": "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/splits/splits_train_val_test/HNSC",
+                "internal_val_size": 0.0
+            },
+            "missing_modality_table": "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/splits/aug_missing_mod/HNSC_missing_modality_table.csv"
+        },
+        "missing_modality_test": {
+            "active": true,
+            "test_scenarios_on_each_epoch": true,
+            "scenarios": [
+                "genomics_miss_25",
+                "genomics_miss_100",
+                "wsi_miss_100",
+                "genomics_miss_50",
+                "genomics_miss_75",
+                "wsi_miss_25",
+                "wsi_miss_50",
+                "wsi_miss_75"
+            ]
+        },
+        "model": {
+            "name": "ProSurv",
+            "pretrained": false,
+            "save_checkpoints": true,
+            "kwargs": {
+                "genomics_group_name": [
+                    "tumor_suppression",
+                    "oncogenesis",
+                    "protein_kinases",
+                    "cellular_differentiation",
+                    "cytokines_and_growth"
+                ],
+                "cnv_group_name": [
+                    "tumor_suppression",
+                    "oncogenesis",
+                    "protein_kinases",
+                    "cellular_differentiation",
+                    "cytokines_and_growth"
+                ],
+                "input_modalities": [
+                    "WSI",
+                    "Genomics"
+                ]
+            }
+        },
+        "loss": {
+            "name": "NLLSurvLoss",
+            "kwargs": {
+                "alpha": 0.0,
+                "eps": 1e-07,
+                "reduction": "mean"
+            }
+        },
+        "scheduler": {
+            "batch_step": false,
+            "name": "MultiStepLR",
+            "milestones": [
+                10
+            ],
+            "gamma": 0.2,
+            "pct_start": 0.1,
+            "steps_per_epoch": 1
+        },
+        "optimizer": {
+            "learning_rate": 0.0001,
+            "name": "RAdam",
+            "weight_decay": 0.0001,
+            "momentum": null
+        },
+        "trainer": {
+            "reload": false,
+            "checkpoint": "",
+            "do_train": false,
+            "do_test": false,
+            "do_inference": false,
+            "do_kfold": true,
+            "epochs": 50,
+            "patience": 50,
+            "AEM_lamda": 0.3,
+            "Save_XA_attention_files": true
+        }
+    },
+    {
+        "title": "ProSurv_augtrain_HNSC",
+        "project_dir": "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/results",
+        "seed": 43,
+        "wandb": {
+            "mode": "online",
+            "project": "augmented_training"
+        },
+        "data_loader": {
+            "missing_modalities_tables": {
+                "active": true,
+                "missing_mod_rate": "complete"
+            },
+            "file_genes_group": "/work/H2020DeciderFicarra/D2_4/Development/HGCN/HGCN_code/pathways_ensg.json",
+            "datasets_configs": [
+                "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/config/datasets/TCGA_HNSC_dataset.yaml"
+            ],
+            "task_type": "Survival",
+            "max_patches": 4096,
+            "batch_size": 1,
+            "real_batch_size": 4,
+            "n_bins": 4,
+            "sample": true,
+            "test_sample": false,
+            "load_slides_in_RAM": true,
+            "label_name": "Survival",
+            "censorships_name": "None",
+            "eps": 1e-06,
+            "num_workers": 2,
+            "train_size": 0.7,
+            "val_size": 0.15,
+            "test_size": 0.15,
+            "random_state": 42,
+            "preprocessing": "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/config/preprocessing.yaml",
+            "augmentation": "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/config/augmentation.yaml",
+            "KFold": {
+                "splits": "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/splits/aug_splits_train_val_test/HNSC",
+                "internal_val_size": 0.0
+            },
+            "missing_modality_table": "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/splits/aug_missing_mod/HNSC_missing_modality_table.csv"
+        },
+        "missing_modality_test": {
+            "active": true,
+            "test_scenarios_on_each_epoch": true,
+            "scenarios": [
+                "genomics_miss_25",
+                "genomics_miss_100",
+                "wsi_miss_100",
+                "genomics_miss_50",
+                "genomics_miss_75",
+                "wsi_miss_25",
+                "wsi_miss_50",
+                "wsi_miss_75"
+            ]
+        },
+        "model": {
+            "name": "ProSurv",
+            "pretrained": false,
+            "save_checkpoints": true,
+            "kwargs": {
+                "genomics_group_name": [
+                    "tumor_suppression",
+                    "oncogenesis",
+                    "protein_kinases",
+                    "cellular_differentiation",
+                    "cytokines_and_growth"
+                ],
+                "cnv_group_name": [
+                    "tumor_suppression",
+                    "oncogenesis",
+                    "protein_kinases",
+                    "cellular_differentiation",
+                    "cytokines_and_growth"
+                ],
+                "input_modalities": [
+                    "WSI",
+                    "Genomics"
+                ]
+            }
+        },
+        "loss": {
+            "name": "NLLSurvLoss",
+            "kwargs": {
+                "alpha": 0.0,
+                "eps": 1e-07,
+                "reduction": "mean"
+            }
+        },
+        "scheduler": {
+            "batch_step": false,
+            "name": "MultiStepLR",
+            "milestones": [
+                10
+            ],
+            "gamma": 0.2,
+            "pct_start": 0.1,
+            "steps_per_epoch": 1
+        },
+        "optimizer": {
+            "learning_rate": 0.0001,
+            "name": "RAdam",
+            "weight_decay": 0.0001,
+            "momentum": null
+        },
+        "trainer": {
+            "reload": false,
+            "checkpoint": "",
+            "do_train": false,
+            "do_test": false,
+            "do_inference": false,
+            "do_kfold": true,
+            "epochs": 50,
+            "patience": 50,
+            "AEM_lamda": 0.3,
+            "Save_XA_attention_files": true
+        }
+    },
+    {
+        "title": "ProSurv_augtrain_STAD",
+        "project_dir": "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/results",
+        "seed": 43,
+        "wandb": {
+            "mode": "online",
+            "project": "augmented_training"
+        },
+        "data_loader": {
+            "missing_modalities_tables": {
+                "active": true,
+                "missing_mod_rate": "complete"
+            },
+            "file_genes_group": "/work/H2020DeciderFicarra/D2_4/Development/HGCN/HGCN_code/pathways_ensg.json",
+            "datasets_configs": [
+                "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/config/datasets/TCGA_STAD_dataset.yaml"
+            ],
+            "task_type": "Survival",
+            "max_patches": 4096,
+            "batch_size": 1,
+            "real_batch_size": 4,
+            "n_bins": 4,
+            "sample": true,
+            "test_sample": false,
+            "load_slides_in_RAM": true,
+            "label_name": "Survival",
+            "censorships_name": "None",
+            "eps": 1e-06,
+            "num_workers": 2,
+            "train_size": 0.7,
+            "val_size": 0.15,
+            "test_size": 0.15,
+            "random_state": 42,
+            "preprocessing": "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/config/preprocessing.yaml",
+            "augmentation": "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/config/augmentation.yaml",
+            "KFold": {
+                "splits": "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/splits/splits_train_val_test/STAD",
+                "internal_val_size": 0.0
+            },
+            "missing_modality_table": "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/splits/aug_missing_mod/STAD_missing_modality_table.csv"
+        },
+        "missing_modality_test": {
+            "active": true,
+            "test_scenarios_on_each_epoch": true,
+            "scenarios": [
+                "genomics_miss_25",
+                "genomics_miss_100",
+                "wsi_miss_100",
+                "genomics_miss_50",
+                "genomics_miss_75",
+                "wsi_miss_25",
+                "wsi_miss_50",
+                "wsi_miss_75"
+            ]
+        },
+        "model": {
+            "name": "ProSurv",
+            "pretrained": false,
+            "save_checkpoints": true,
+            "kwargs": {
+                "genomics_group_name": [
+                    "tumor_suppression",
+                    "oncogenesis",
+                    "protein_kinases",
+                    "cellular_differentiation",
+                    "cytokines_and_growth"
+                ],
+                "cnv_group_name": [
+                    "tumor_suppression",
+                    "oncogenesis",
+                    "protein_kinases",
+                    "cellular_differentiation",
+                    "cytokines_and_growth"
+                ],
+                "input_modalities": [
+                    "WSI",
+                    "Genomics"
+                ]
+            }
+        },
+        "loss": {
+            "name": "NLLSurvLoss",
+            "kwargs": {
+                "alpha": 0.0,
+                "eps": 1e-07,
+                "reduction": "mean"
+            }
+        },
+        "scheduler": {
+            "batch_step": false,
+            "name": "MultiStepLR",
+            "milestones": [
+                10
+            ],
+            "gamma": 0.2,
+            "pct_start": 0.1,
+            "steps_per_epoch": 1
+        },
+        "optimizer": {
+            "learning_rate": 0.0001,
+            "name": "RAdam",
+            "weight_decay": 0.0001,
+            "momentum": null
+        },
+        "trainer": {
+            "reload": false,
+            "checkpoint": "",
+            "do_train": false,
+            "do_test": false,
+            "do_inference": false,
+            "do_kfold": true,
+            "epochs": 50,
+            "patience": 50,
+            "AEM_lamda": 0.3,
+            "Save_XA_attention_files": true
+        }
+    },
+    {
+        "title": "ProSurv_augtrain_STAD",
+        "project_dir": "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/results",
+        "seed": 43,
+        "wandb": {
+            "mode": "online",
+            "project": "augmented_training"
+        },
+        "data_loader": {
+            "missing_modalities_tables": {
+                "active": true,
+                "missing_mod_rate": "complete"
+            },
+            "file_genes_group": "/work/H2020DeciderFicarra/D2_4/Development/HGCN/HGCN_code/pathways_ensg.json",
+            "datasets_configs": [
+                "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/config/datasets/TCGA_STAD_dataset.yaml"
+            ],
+            "task_type": "Survival",
+            "max_patches": 4096,
+            "batch_size": 1,
+            "real_batch_size": 4,
+            "n_bins": 4,
+            "sample": true,
+            "test_sample": false,
+            "load_slides_in_RAM": true,
+            "label_name": "Survival",
+            "censorships_name": "None",
+            "eps": 1e-06,
+            "num_workers": 2,
+            "train_size": 0.7,
+            "val_size": 0.15,
+            "test_size": 0.15,
+            "random_state": 42,
+            "preprocessing": "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/config/preprocessing.yaml",
+            "augmentation": "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/config/augmentation.yaml",
+            "KFold": {
+                "splits": "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/splits/aug_splits_train_val_test/STAD",
+                "internal_val_size": 0.0
+            },
+            "missing_modality_table": "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/splits/aug_missing_mod/STAD_missing_modality_table.csv"
+        },
+        "missing_modality_test": {
+            "active": true,
+            "test_scenarios_on_each_epoch": true,
+            "scenarios": [
+                "genomics_miss_25",
+                "genomics_miss_100",
+                "wsi_miss_100",
+                "genomics_miss_50",
+                "genomics_miss_75",
+                "wsi_miss_25",
+                "wsi_miss_50",
+                "wsi_miss_75"
+            ]
+        },
+        "model": {
+            "name": "ProSurv",
+            "pretrained": false,
+            "save_checkpoints": true,
+            "kwargs": {
+                "genomics_group_name": [
+                    "tumor_suppression",
+                    "oncogenesis",
+                    "protein_kinases",
+                    "cellular_differentiation",
+                    "cytokines_and_growth"
+                ],
+                "cnv_group_name": [
+                    "tumor_suppression",
+                    "oncogenesis",
+                    "protein_kinases",
+                    "cellular_differentiation",
+                    "cytokines_and_growth"
+                ],
+                "input_modalities": [
+                    "WSI",
+                    "Genomics"
+                ]
+            }
+        },
+        "loss": {
+            "name": "NLLSurvLoss",
+            "kwargs": {
+                "alpha": 0.0,
+                "eps": 1e-07,
+                "reduction": "mean"
+            }
+        },
+        "scheduler": {
+            "batch_step": false,
+            "name": "MultiStepLR",
+            "milestones": [
+                10
+            ],
+            "gamma": 0.2,
+            "pct_start": 0.1,
+            "steps_per_epoch": 1
+        },
+        "optimizer": {
+            "learning_rate": 0.0001,
+            "name": "RAdam",
+            "weight_decay": 0.0001,
+            "momentum": null
+        },
+        "trainer": {
+            "reload": false,
+            "checkpoint": "",
+            "do_train": false,
+            "do_test": false,
+            "do_inference": false,
+            "do_kfold": true,
+            "epochs": 50,
+            "patience": 50,
+            "AEM_lamda": 0.3,
+            "Save_XA_attention_files": true
+        }
+    },
+    {
+        "title": "ProSurv_augtrain_BRCA",
+        "project_dir": "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/results",
+        "seed": 43,
+        "wandb": {
+            "mode": "online",
+            "project": "augmented_training"
+        },
+        "data_loader": {
+            "missing_modalities_tables": {
+                "active": true,
+                "missing_mod_rate": "complete"
+            },
+            "file_genes_group": "/work/H2020DeciderFicarra/D2_4/Development/HGCN/HGCN_code/pathways_ensg.json",
+            "datasets_configs": [
+                "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/config/datasets/TCGA_BRCA_dataset.yaml"
+            ],
+            "task_type": "Survival",
+            "max_patches": 4096,
+            "batch_size": 1,
+            "real_batch_size": 4,
+            "n_bins": 4,
+            "sample": true,
+            "test_sample": false,
+            "load_slides_in_RAM": true,
+            "label_name": "Survival",
+            "censorships_name": "None",
+            "eps": 1e-06,
+            "num_workers": 2,
+            "train_size": 0.7,
+            "val_size": 0.15,
+            "test_size": 0.15,
+            "random_state": 42,
+            "preprocessing": "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/config/preprocessing.yaml",
+            "augmentation": "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/config/augmentation.yaml",
+            "KFold": {
+                "splits": "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/splits/splits_train_val_test/BRCA",
+                "internal_val_size": 0.0
+            },
+            "missing_modality_table": "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/splits/aug_missing_mod/BRCA_missing_modality_table.csv"
+        },
+        "missing_modality_test": {
+            "active": true,
+            "test_scenarios_on_each_epoch": true,
+            "scenarios": [
+                "genomics_miss_25",
+                "genomics_miss_100",
+                "wsi_miss_100",
+                "genomics_miss_50",
+                "genomics_miss_75",
+                "wsi_miss_25",
+                "wsi_miss_50",
+                "wsi_miss_75"
+            ]
+        },
+        "model": {
+            "name": "ProSurv",
+            "pretrained": false,
+            "save_checkpoints": true,
+            "kwargs": {
+                "genomics_group_name": [
+                    "tumor_suppression",
+                    "oncogenesis",
+                    "protein_kinases",
+                    "cellular_differentiation",
+                    "cytokines_and_growth"
+                ],
+                "cnv_group_name": [
+                    "tumor_suppression",
+                    "oncogenesis",
+                    "protein_kinases",
+                    "cellular_differentiation",
+                    "cytokines_and_growth"
+                ],
+                "input_modalities": [
+                    "WSI",
+                    "Genomics"
+                ]
+            }
+        },
+        "loss": {
+            "name": "NLLSurvLoss",
+            "kwargs": {
+                "alpha": 0.0,
+                "eps": 1e-07,
+                "reduction": "mean"
+            }
+        },
+        "scheduler": {
+            "batch_step": false,
+            "name": "MultiStepLR",
+            "milestones": [
+                10
+            ],
+            "gamma": 0.2,
+            "pct_start": 0.1,
+            "steps_per_epoch": 1
+        },
+        "optimizer": {
+            "learning_rate": 0.0001,
+            "name": "RAdam",
+            "weight_decay": 0.0001,
+            "momentum": null
+        },
+        "trainer": {
+            "reload": false,
+            "checkpoint": "",
+            "do_train": false,
+            "do_test": false,
+            "do_inference": false,
+            "do_kfold": true,
+            "epochs": 50,
+            "patience": 50,
+            "AEM_lamda": 0.3,
+            "Save_XA_attention_files": true
+        }
+    },
+    {
+        "title": "ProSurv_augtrain_BRCA",
+        "project_dir": "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/results",
+        "seed": 43,
+        "wandb": {
+            "mode": "online",
+            "project": "augmented_training"
+        },
+        "data_loader": {
+            "missing_modalities_tables": {
+                "active": true,
+                "missing_mod_rate": "complete"
+            },
+            "file_genes_group": "/work/H2020DeciderFicarra/D2_4/Development/HGCN/HGCN_code/pathways_ensg.json",
+            "datasets_configs": [
+                "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/config/datasets/TCGA_BRCA_dataset.yaml"
+            ],
+            "task_type": "Survival",
+            "max_patches": 4096,
+            "batch_size": 1,
+            "real_batch_size": 4,
+            "n_bins": 4,
+            "sample": true,
+            "test_sample": false,
+            "load_slides_in_RAM": true,
+            "label_name": "Survival",
+            "censorships_name": "None",
+            "eps": 1e-06,
+            "num_workers": 2,
+            "train_size": 0.7,
+            "val_size": 0.15,
+            "test_size": 0.15,
+            "random_state": 42,
+            "preprocessing": "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/config/preprocessing.yaml",
+            "augmentation": "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/config/augmentation.yaml",
+            "KFold": {
+                "splits": "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/splits/aug_splits_train_val_test/BRCA",
+                "internal_val_size": 0.0
+            },
+            "missing_modality_table": "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/splits/aug_missing_mod/BRCA_missing_modality_table.csv"
+        },
+        "missing_modality_test": {
+            "active": true,
+            "test_scenarios_on_each_epoch": true,
+            "scenarios": [
+                "genomics_miss_25",
+                "genomics_miss_100",
+                "wsi_miss_100",
+                "genomics_miss_50",
+                "genomics_miss_75",
+                "wsi_miss_25",
+                "wsi_miss_50",
+                "wsi_miss_75"
+            ]
+        },
+        "model": {
+            "name": "ProSurv",
+            "pretrained": false,
+            "save_checkpoints": true,
+            "kwargs": {
+                "genomics_group_name": [
+                    "tumor_suppression",
+                    "oncogenesis",
+                    "protein_kinases",
+                    "cellular_differentiation",
+                    "cytokines_and_growth"
+                ],
+                "cnv_group_name": [
+                    "tumor_suppression",
+                    "oncogenesis",
+                    "protein_kinases",
+                    "cellular_differentiation",
+                    "cytokines_and_growth"
+                ],
+                "input_modalities": [
+                    "WSI",
+                    "Genomics"
+                ]
+            }
+        },
+        "loss": {
+            "name": "NLLSurvLoss",
+            "kwargs": {
+                "alpha": 0.0,
+                "eps": 1e-07,
+                "reduction": "mean"
+            }
+        },
+        "scheduler": {
+            "batch_step": false,
+            "name": "MultiStepLR",
+            "milestones": [
+                10
+            ],
+            "gamma": 0.2,
+            "pct_start": 0.1,
+            "steps_per_epoch": 1
+        },
+        "optimizer": {
+            "learning_rate": 0.0001,
+            "name": "RAdam",
+            "weight_decay": 0.0001,
+            "momentum": null
+        },
+        "trainer": {
+            "reload": false,
+            "checkpoint": "",
+            "do_train": false,
+            "do_test": false,
+            "do_inference": false,
+            "do_kfold": true,
+            "epochs": 50,
+            "patience": 50,
+            "AEM_lamda": 0.3,
+            "Save_XA_attention_files": true
+        }
+    }
+]
