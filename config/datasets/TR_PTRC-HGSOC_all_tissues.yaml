@@ -10,3 +10,4 @@ parameters:
   censorships_name: "None"
   case_id_name: "case_id"
   slide_id_name: "slide_id"
+  missing_modalities_table_path : /work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/utils/missing_mod/chemorefractory_missing_modality_table.csv
