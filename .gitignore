@@ -9,7 +9,7 @@ slurm_out
 data
 dataset/*
 slurm_templates
-
+csv_results/
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
