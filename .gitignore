@@ -189,5 +189,9 @@ demo/*old*
 main_dev.py
 experiments/chart_results.csv
 splits/loo_remaining
+splits/Treatment_Response
+splits/TITAN*
 
 
+stats/patches_all_tissues.txt
+stats/patches.txt
