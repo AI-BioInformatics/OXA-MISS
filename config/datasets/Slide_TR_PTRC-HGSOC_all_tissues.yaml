@@ -1,4 +1,5 @@
 name: PTRC-HGSOC
+
 parameters:
   dataframe_path: "/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/dataloader/dataset/PTRC-HGSOC_all_tissues_labels.csv"
   pt_files_path: "/work/H2020DeciderFicarra/D2_4/datasets/PTRC-HGSOC/features_UNI/pt_files"
