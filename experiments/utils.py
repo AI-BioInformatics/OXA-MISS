@@ -33,7 +33,7 @@ def move_to_device(data, device):
 def import_class_from_path(import_path, model_name, **kwargs):
         # model_name = self.config.model.name
         try:
-            # import_path = f"/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/experiments/models/{model_name}.py"
+            # import_path = f"MultimodalDecider/experiments/models/{model_name}.py"
             # ModelClass = import_class_from_path(import_path, model_name)
 
             import_path = Path(import_path).resolve()  # Risolve il percorso assoluto
@@ -116,7 +116,7 @@ def KaplanMeier_plot(log_dict):
     # Close the figure after saving it to avoid memory issues
     plt.close(fig)
     image = Image.open(buffer)
-    #image.save("/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/cm.png")
+    #image.save("MultimodalDecider/cm.png")
     
     # Return the PIL Image object to be logged later
     return image
@@ -155,7 +155,7 @@ def accuracy_confusionMatrix_plot(log_dict, metrics_df):
     # Close the figure after saving it to avoid memory issues
     plt.close(fig)
     image = Image.open(buffer)
-    #image.save("/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/cm.png")
+    #image.save("MultimodalDecider/cm.png")
     
     # Return the PIL Image object to be logged later
     return image

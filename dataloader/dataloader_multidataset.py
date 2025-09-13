@@ -13,14 +13,14 @@ import json
 
 
 class Multimodal_Bio_Dataset(Dataset):
-    def __init__(self,  datasets_configs = ["/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/config/Decider_dataset.yaml"],
+    def __init__(self,  datasets_configs = ["MultimodalDecider/config/Decider_dataset.yaml"],
                         task_type="Survival", # Survival or treatment_response
                         max_patches=4096,
                         n_bins=4,
                         eps=1e-6,
                         sample=True,
                         load_slides_in_RAM=False,
-                        file_genes_group='/work/H2020DeciderFicarra/D2_4/datasets/DECIDER_cohorts/Gene_expression/Expression/daria_mapped.json',
+                        file_genes_group='D2_4/datasets/DECIDER_cohorts/Gene_expression/Expression/daria_mapped.json',
                         
                         genomics_group_name = ["high_refractory", "high_sensitive",  "hypoxia_pathway"],
                         cnv_group_name = ["high_refractory", "high_sensitive",  "hypoxia_pathway"],

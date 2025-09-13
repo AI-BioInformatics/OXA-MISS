@@ -2,10 +2,17 @@
 import asyncio, re
 from telegram import Bot
 
-TOKEN = "7514286919:AAFb5AhURo10uYIrXx5cOfF0R-unSNaKlPY"
-CHANNEL_ID = "-1002519311384"
+# import token e CHANNEL_ID da file .env
+from dotenv import load_dotenv
+import os
+load_dotenv()
+TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", None)
+CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID", None)
 
 async def send_telegram_message(message:str):
+    if TOKEN is None or CHANNEL_ID is None:
+        print("Telegram token or channel ID not set in environment variables.")
+        return
     bot = Bot(token=TOKEN)
     message = re.sub(r"\.(?=\d)", "\\.", message)
     message = message.replace("-", "\-")
@@ -16,4 +23,4 @@ async def send_telegram_message(message:str):
     print("Chat ID:", msg.chat_id)
 
 if __name__ == "__main__":
-    asyncio.run(send_telegram_message("*Prova 0.1*"))
+    asyncio.run(send_telegram_message("*Test message*"))

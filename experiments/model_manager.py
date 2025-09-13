@@ -31,7 +31,9 @@ class ModelManager():
     def __init__(self,
                  config, 
                  ModelClass,
+                 results_store
                  ):
+        self.results_store = results_store
         self.config = config
         self.device = config.model.device
         self.real_batch_size = config.data_loader.real_batch_size
@@ -768,7 +770,8 @@ class ModelManager():
                 Save_XA_attention_files=False,
                 eval_missing_modality_scenario=None,
                 print_demo_results=False,
-                is_demo=False):
+                is_demo_test=False,
+                repo_path=None):
         if not eval_missing_modality_scenario:
             eval_missing_modality_scenario_suffix = ""
         else:
@@ -781,8 +784,6 @@ class ModelManager():
         log_fold_string = f"/{kfold}"     
         models = []
         summary_paths = []
-        h5_prefixes = []
-        csv_prefixes = []
         
         if best:
             if kfold != "":
@@ -800,8 +801,6 @@ class ModelManager():
                 model_lowest_l = torch.load(checkpoint_last_epoch, weights_only=False)
             models.append(model_lowest_l)
             summary_paths.append('Lowest_Validation_Loss_Model/Test')
-            h5_prefixes.append('lowest_val_loss_test_df')
-            csv_prefixes.append('lowest_val_loss_test_metrics')
             
             if os.path.exists(checkpoint_model_highest_metric):
                 model_highest_m = torch.load(checkpoint_model_highest_metric, weights_only=False)
@@ -811,8 +810,6 @@ class ModelManager():
             
             models.append(model_highest_m)
             summary_paths.append('Highest_Validation_Metric_Model/Test')
-            h5_prefixes.append('highest_val_metric_test_df')
-            csv_prefixes.append('highest_val_metric_test_metrics')
                 
             last_model = torch.load(checkpoint_last_epoch, weights_only=False)
             logging.info("\n Evaluate best model")
@@ -822,18 +819,13 @@ class ModelManager():
 
         models.append(last_model)
         summary_paths.append('Last_Epoch_Model/Test')
-        h5_prefixes.append('last_epoch_test_df')
-        csv_prefixes.append('last_epoch_test_metrics')
 
         if emms_suffix:
-            for i, (model, summary_path, h5_prefixe, csv_prefixe) in enumerate(zip(models, summary_paths, h5_prefixes, csv_prefixes)):
-                summary_paths[i] += f"/Missing_modalities_scenarios/{eval_missing_modality_scenario}"
-                h5_prefixes[i] += emms_suffix
-                csv_prefixes[i] += emms_suffix
-        
+            for i, (model, summary_path) in enumerate(zip(models, summary_paths)):
+                summary_paths[i] += f"/Missing_modalities_scenarios/{eval_missing_modality_scenario}"        
 
-
-        for model, summary_path, h5_prefixe, csv_prefixe in zip(models, summary_paths, h5_prefixes, csv_prefixes):
+        scenario = eval_missing_modality_scenario if eval_missing_modality_scenario else "base"
+        for model, summary_path in zip(models, summary_paths):
             model = model.to(device)
             model.eval()
             tloss = []
@@ -872,17 +864,23 @@ class ModelManager():
             test_df = pd.DataFrame(log_dict)
             test_metrics_dict = self.compute_metrics_df(test_df, task_type)
 
+            self.results_store.add_result(
+                scenario=scenario,
+                model_version=summary_path.split("/")[0],
+                fold_result=test_metrics_dict,
+                fold_num=int(kfold.split('_')[1]) if kfold else 0
+            )
+
             for key, value in test_metrics_dict.items():
                 wandb.run.summary[f"{summary_path}{log_fold_string}/{key}"] = value
-
-            test_df.to_hdf(f"{path}/{h5_prefixe}{df_fold_suffix}.h5", key="df", mode="w")
-            test_metrics_df = pd.DataFrame(test_metrics_dict, index=[0])
-            test_metrics_df.to_csv(f"{path}/{csv_prefixe}{df_fold_suffix}.csv")
 
         model_name = model.__class__.__name__ 
 
         if log_aggregated:
-            logs = self.log_aggregated(path, summary_paths, h5_prefixes, task_type, is_missing_mod_test=emms_suffix!="")
+            test_scenario = scenario
+            aggregated_metrics = self.results_store.compute_aggregated_metrics(test_scenario, task_type)
+            self._log_aggregated_metrics(aggregated_metrics, test_scenario, task_type)
+            
             if log_on_telegram:
                 from .telegram_logger import send_telegram_message
                 import asyncio
@@ -891,7 +889,7 @@ class ModelManager():
                 if key not in ["input_modalities"]:
                     columns.append(key)
             if task_type == 'Treatment_Response':
-                csv_path = f"/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/experiments/test_results_csv/TS_{model_name}.csv"
+                csv_path = f"{repo_path}/experiments/test_results_csv/TS_{model_name}.csv"
                 if not os.path.exists(csv_path):
                     columns += ["F1-Score_mean", "F1-Score_std", 'AUC_mean', 'AUC_std', 'Accuracy_mean', 'Accuracy_std', 'Mean_F1-Score_AUC']
                     df_old_records = pd.DataFrame(columns=columns)
@@ -903,15 +901,16 @@ class ModelManager():
                 # df_old_records["Mean_AUC_F1"] = (df_old_records["AUC_mean"] + df_old_records["F1-Score_mean"]) / 2
                 max_mean_auc_f1 = df_old_records["Mean_F1-Score_AUC"].max()
                 df_old_records_sorted = df_old_records.sort_values(by="Mean_F1-Score_AUC", ascending=False)
-                for i, log in enumerate(logs):
+                # for i, log in enumerate(aggregated_metrics):
+                for model_version, metrics in aggregated_metrics.items():
                     overperformed_metrics = []
 
-                    current_f1_mean = log['F1-Score_mean']
-                    current_auc_mean = log['AUC_mean']
-                    current_acc_mean = log['Accuracy_mean']
-                    current_f1_std = log['F1-Score_std']
-                    current_auc_std = log['AUC_std']
-                    current_acc_std = log['Accuracy_std']
+                    current_f1_mean = metrics['F1-Score_mean']
+                    current_auc_mean = metrics['AUC_mean']
+                    current_acc_mean = metrics['Accuracy_mean']
+                    current_f1_std = metrics['F1-Score_std']
+                    current_auc_std = metrics['AUC_std']
+                    current_acc_std = metrics['Accuracy_std']
 
                     if current_f1_mean > max_f1: overperformed_metrics.append('F1-Score')
                     if current_auc_mean > max_auc: overperformed_metrics.append('AUC')
@@ -921,7 +920,7 @@ class ModelManager():
                     position = (df_old_records_sorted["Mean_F1-Score_AUC"] > current_mean_auc_f1).sum() + 1
                     if log_on_telegram and (position <= 10 or current_mean_auc_f1 > max_mean_auc_f1-0.035 or overperformed_metrics):
                         missing_mod_test_part = "\n*Missing modality scenario*: " + str(eval_missing_modality_scenario) if eval_missing_modality_scenario else ""
-                        telegram_message = f"*Run id*: {wandb.run.id} \n*Seed*: {self.config.seed} \n*Dataset*: {self.get_dataset_name()} \n*Task*: {task_type}  \n*Model Class*: {self.net.__class__.__name__}\n*Model version*: {log['model_version']}{missing_mod_test_part}\n\n*F1s mean*: {current_f1_mean:.3f} ± {current_f1_std:.3f}\n*AUC mean*: {current_auc_mean:.3f} ± {current_auc_std:.3f}\n*Accuracy mean*: {current_acc_mean:.3f} ± {current_acc_std:.3f}\n\n"                
+                        telegram_message = f"*Run id*: {wandb.run.id} \n*Seed*: {self.config.seed} \n*Dataset*: {self.get_dataset_name()} \n*Task*: {task_type}  \n*Model Class*: {self.net.__class__.__name__}\n*Model version*: {model_version}{missing_mod_test_part}\n\n*F1s mean*: {current_f1_mean:.3f} ± {current_f1_std:.3f}\n*AUC mean*: {current_auc_mean:.3f} ± {current_auc_std:.3f}\n*Accuracy mean*: {current_acc_mean:.3f} ± {current_acc_std:.3f}\n\n"                
                         telegram_message += f"*overperformed metrics*: {overperformed_metrics if overperformed_metrics else 'none'}\n\n"
                         telegram_message += f"*Mean F1s-AUC*: {current_mean_auc_f1:.3f} -> {position}° best run"
                         asyncio.run(send_telegram_message(telegram_message))
@@ -929,9 +928,9 @@ class ModelManager():
                 
             # elif task_type == 'Survival':
             else:
-                csv_path = f"/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/experiments/test_results_csv/Surv_{model_name}.csv"
-                if is_demo:
-                    csv_path = csv_path.replace(".csv", "_demo.csv")
+                csv_path = f"{repo_path}/experiments/test_results_csv/Surv_{model_name}.csv"
+                if is_demo_test:
+                    csv_path = csv_path.replace(".csv", "_demo_test.csv")
                 if not os.path.exists(csv_path):
                     columns += ["c-index_mean", "c-index_std", "c-index_list"]
                     df_old_records = pd.DataFrame(columns=columns)
@@ -941,12 +940,11 @@ class ModelManager():
                         df_old_records['c-index_list'] = None
                 max_c_index_mean = df_old_records["c-index_mean"].max() if "c-index_mean" in df_old_records.columns and df_old_records.size else 0 
                 df_old_records_sorted = df_old_records.sort_values(by="c-index_mean", ascending=False) if "c-index_mean" in df_old_records.columns and df_old_records.size else None
-                for i, log in enumerate(logs):
+                for model_version, metrics in aggregated_metrics.items():
                     overperformed_metrics = []
 
-                    current_c_index_mean = log['c-index_mean']
-                    current_c_index_std = log['c-index_std']
-                    current_c_index_list = log['c-index_list']
+                    current_c_index_mean = metrics['c-index_mean']
+                    current_c_index_std = metrics['c-index_std']
 
                     if current_c_index_mean > max_c_index_mean: overperformed_metrics.append('C-index')
                     
@@ -956,17 +954,17 @@ class ModelManager():
                         position = 1
                     if log_on_telegram and (position <= 10 or current_c_index_mean > max_c_index_mean-0.035 or overperformed_metrics):
                         missing_mod_test_part = "\n*Missing modality scenario*: " + str(eval_missing_modality_scenario) if eval_missing_modality_scenario else ""
-                        telegram_message = f"*Run id*: {wandb.run.id} \n*Seed*: {self.config.seed} \n*Dataset*: {self.get_dataset_name()} \n*Task*: {task_type} \n*Model Class*: {self.net.__class__.__name__}\n*Model version*: {log['model_version']}{missing_mod_test_part}\n\n*C-index mean*: {current_c_index_mean:.3f} ± {current_c_index_std:.3f}\n\n"                
+                        telegram_message = f"*Run id*: {wandb.run.id} \n*Seed*: {self.config.seed} \n*Dataset*: {self.get_dataset_name()} \n*Task*: {task_type} \n*Model Class*: {self.net.__class__.__name__}\n*Model version*: {model_version}{missing_mod_test_part}\n\n*C-index mean*: {current_c_index_mean:.3f} ± {current_c_index_std:.3f}\n\n"                
                         telegram_message += f"*overperformed metrics*: {overperformed_metrics if overperformed_metrics else 'none'}\n\n"
                         telegram_message += f"*Mean C-index*: {current_c_index_mean:.3f} -> {position}° best run"
                         asyncio.run(send_telegram_message(telegram_message))
             
-            for i, log in enumerate(logs):
+            for model_version, metrics in aggregated_metrics.items():
                 new_row = {
                     "ID": wandb.run.id,
                     "model_name": model_name,
                     "dataset_name" : self.get_dataset_name(),
-                    "model_version": log['model_version'],
+                    "model_version": model_version.split('/')[0],
                     "End Time": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
                     "seed": self.config.seed,
                     "internal_val_size": self.config.data_loader.KFold.internal_val_size,
@@ -975,7 +973,7 @@ class ModelManager():
                 }
                 
                 if task_type == "Treatment_Response":
-                    new_row["Mean_F1-Score_AUC"] = log["Mean_F1-Score_AUC"]
+                    new_row["Mean_F1-Score_AUC"] = metrics["Mean_F1-Score_AUC"]
                     
 
                 if hasattr(self.config.model.kwargs, "input_modalities"):
@@ -1005,25 +1003,27 @@ class ModelManager():
                 #             new_row[key] = value
 
                 if task_type == "Treatment_Response":
-                    metrics = ["AUC", "F1-Score", "Accuracy"]
+                    task_metrics = ["AUC", "F1-Score", "Accuracy"]
                 else:
-                    metrics = ["c-index"]
+                    task_metrics = ["c-index"]
                                 
-                for metric in metrics:
-                    for suffix in ["_mean", "_std", "_list", ""]:
+                for metric in task_metrics:
+                    for suffix in ["_mean", "_std", "_list"]:
                         key = metric+suffix
-                        new_row[key] = log[key]
+                        new_row[key] = np.round(metrics[key], 3).tolist()
                 df_old_records = pd.concat([df_old_records, pd.DataFrame([new_row])], ignore_index=True)
-                
+            df_old_records.to_csv(csv_path, index=False)
+                    
 
             if print_demo_results:
                 # Stampo il df in console, solo le colonne: ID,model_name,dataset_name,model_version,modality_setting, test_scenario,c-index, c-index_mean, c-index_std, c-index_list
                 # c-index_mean, c-index_std arrotondati al terzo decimale
                 print("\n\n\n\n\n\n\n\n\n")
                 print("Demo results:\n")
-                print(df_old_records[["ID", "model_name", "dataset_name", "model_version", "modality_setting", "c-index", "test_scenario", "c-index_mean", "c-index_std", "c-index_list"]].round(3).to_string(index=False))
+                df_old_records_filtered = df_old_records[df_old_records.ID == wandb.run.id]
+                print(df_old_records_filtered[["ID", "model_name", "dataset_name", "model_version", "modality_setting", "test_scenario", "c-index_mean", "c-index_std", "c-index_list"]].round(3).to_string(index=False))
                 print("\n\n\n")
-            df_old_records.to_csv(csv_path, index=False)
+            
 
             '''
             Demo results:
@@ -1041,45 +1041,19 @@ class ModelManager():
             
             '''
 
-
-    def log_aggregated(self, result_path, summary_paths, h5_prefixes, task_type="Survival", is_missing_mod_test=False):
-        logs = []
-        for summary_path, h5_prefix in zip(summary_paths, h5_prefixes):
-            if not is_missing_mod_test:
-                h5_prefix = f"{h5_prefix}_Fold"
-            prefix = h5_prefix
-            out = kfold_results_merge(result_path, prefix, task_type)
-
-            if task_type == "Survival":
-                to_log = {
-                    f"{summary_path}/Aggregated/c-index": out['c-index'],
-                    f"{summary_path}/Aggregated/c-index_std": out['c-index_std'],
-                    f"{summary_path}/Aggregated/c-index_mean": out['c-index_mean'],
-                }
-                # add KM plot
-            elif task_type == "Treatment_Response":
-                to_log = {
-                f"{summary_path}/Aggregated/AUC": out['AUC'],
-                f"{summary_path}/Aggregated/Accuracy": out['Accuracy'],
-                f"{summary_path}/Aggregated/F1-Score": out['F1-Score'],
+    def _log_aggregated_metrics(self, aggregated_metrics, scenario, task_type):
+        """Log aggregated metrics for a specific scenario"""
+        for model_version, metrics in aggregated_metrics.items():
+            path_prefix = f"{model_version}/Aggregated"
+            if scenario != "base":
+                path_prefix += f"/Missing_modalities_scenarios/{scenario}"
                 
-                f"{summary_path}/Aggregated/AUC_std": out['AUC_std'],
-                f"{summary_path}/Aggregated/Accuracy_std": out['Accuracy_std'],
-                f"{summary_path}/Aggregated/F1-Score_std": out['F1-Score_std'],
+            to_log = {}
+            for key, value in metrics.items():
+                if key not in ["model_version", "Confusion_Matrix"]:
+                    to_log[f"{path_prefix}/{key}"] = value
+                    
+            if "Confusion_Matrix" in metrics:
+                to_log[f"{path_prefix}/Confusion_Matrix"] = wandb.Image(metrics["Confusion_Matrix"])
                 
-                f"{summary_path}/Aggregated/AUC_mean": out['AUC_mean'],
-                f"{summary_path}/Aggregated/Accuracy_mean": out['Accuracy_mean'],
-                f"{summary_path}/Aggregated/F1-Score_mean": out['F1-Score_mean'],
-
-                f"{summary_path}/Aggregated/Mean_F1-Score_AUC": (out['F1-Score_mean'] + out['AUC_mean'])/2
-                }
-
-                if 'Confusion_Matrix' in out:
-                    to_log[f"{summary_path}/Aggregated/Confusion_Matrix"] = wandb.Image(out['Confusion_Matrix'])
-
-                out['Mean_F1-Score_AUC'] = (out['F1-Score_mean'] + out['AUC_mean'])/2
-            out['model_version'] = summary_path.split("/")[0]
-            logs.append(out)
             wandb.log(to_log)
-        return logs
-

@@ -2,8 +2,6 @@ import sys
 import os
 import argparse
 import logging
-import logging.config
-import shutil
 import yaml
 import random
 import json
@@ -20,7 +18,7 @@ import wandb
 from experiments.model_manager import ModelManager
 from dataloader.dataloader_multidataset import Multimodal_Bio_Dataset
 from dataloader.dataloader_utils import get_dataloaders
-from experiments.utils import import_class_from_path
+from experiments.utils import import_class_from_path, ResultsStore
 import collections.abc
 
 
@@ -88,6 +86,8 @@ if __name__ == "__main__":
     hostname = os.environ.get("HOSTNAME", 'unknown')
     logging.info(f"HOSTNAME: {hostname}")
 
+    results_store = ResultsStore()
+
     # Parse arguments
     arg_parser = argparse.ArgumentParser()
     arg_parser.add_argument("-c", "--config", required=True, type=str,
@@ -98,8 +98,15 @@ if __name__ == "__main__":
     arg_parser.add_argument("--grid_search_model_version_index", type=int, default=None)  
     arg_parser.add_argument("--TCGA_dataset_name", type=str, default=None)     
     arg_parser.add_argument("--TRAINING_missing_mod_rate", type=str, default=None)     
-    arg_parser.add_argument("--demo",  action='store_true')     
+    arg_parser.add_argument("--demo_test",  action='store_true')          
+    arg_parser.add_argument("--demo_training",  action='store_true')     
     args = arg_parser.parse_args()
+
+    execution_dir = os.path.dirname(os.path.abspath(__file__))
+    if os.path.basename(execution_dir) not in ["MultimodalDecider", "OXA-MISS"]:
+        raise(ValueError('main.py must be executed from the original repo directory'))
+
+    repo_dir = execution_dir
 
     # check if the config files exists
     if not os.path.exists(args.config):
@@ -111,7 +118,21 @@ if __name__ == "__main__":
     config = yaml.load(open(args.config, "r"), yaml.FullLoader)
     config = munchify(config)
 
-    import_path = f"/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/experiments/models/{config.model.name}.py"
+    if args.grid_search_model_version_index is not None:
+        grid_search_model_version_index = args.grid_search_model_version_index
+        if not isinstance(grid_search_model_version_index, int):
+            raise ValueError("grid_search_model_version_index must be an integer")
+        if grid_search_model_version_index < 0:  
+            raise ValueError("grid_search_model_version_index must be a positive integer")
+
+        config.grid_search_model_version_index = grid_search_model_version_index
+        json_path = os.path.join(config.trainer.grid_search_versions_path, config.model.name + "_versions.json")
+        with open(json_path, 'r') as file:
+            grid_search_version = json.load(file)[grid_search_model_version_index]
+
+        config = munchify(recursive_update(config, grid_search_version))
+
+    import_path = f"{repo_dir}/experiments/models/{config.model.name}.py"
     ModelClass = import_class_from_path(import_path, config.model.name)
 
     config = repair_config(config, args.seed)
@@ -121,25 +142,6 @@ if __name__ == "__main__":
         if not hasattr(config.data_loader, 'missing_modalities_tables') or not config.data_loader.missing_modalities_tables.active:
             raise ValueError("config.data_loader.missing_modalities_tables.active must be True to set TRAINING_missing_mod_rate")
         config.data_loader.missing_modalities_tables.missing_mod_rate = args.TRAINING_missing_mod_rate
-
-    
-    if args.grid_search_model_version_index is not None:
-        grid_search_model_version_index = args.grid_search_model_version_index
-        if not isinstance(grid_search_model_version_index, int):
-            raise ValueError("grid_search_model_version_index must be an integer")
-        if grid_search_model_version_index < 0:  
-            raise ValueError("grid_search_model_version_index must be a positive integer")
-      #     with open(json_path, 'r') as file:
-    #         grid_search_version = json.load(file)[grid_search_model_version_index]
-    #     grid_search_version = munchify(grid_search_version)
-    #     config.model.kwargs.update(grid_search_version)    
-
-        config.grid_search_model_version_index = grid_search_model_version_index
-        json_path = os.path.join(config.trainer.grid_search_versions_path, config.model.name + "_versions.json")
-        with open(json_path, 'r') as file:
-            grid_search_version = json.load(file)[grid_search_model_version_index]
-
-        config = munchify(recursive_update(config, grid_search_version))
 
     if args.TCGA_dataset_name is not None and 'BRCA' in config.data_loader.KFold.splits:
         if len(config.data_loader.datasets_configs) == 1 and 'BRCA' in config.data_loader.datasets_configs[0]:
@@ -195,12 +197,9 @@ if __name__ == "__main__":
     config.title = f'{config.title}_YY{todays_date.year}-MM{str(todays_date.month).zfill(2)}-DD{str(todays_date.day).zfill(2)}-HH{now.hour:02}-MM{now.minute:02}_{timehash()}'
     parent_directory = os.path.join(config.project_dir, config.title)
     config.parent_directory = parent_directory
-    # checkpoint_file_name = 'checkpoint.pt'
-    #if hasattr(config.trainer, 'checkpoint'):
     checkpoint_last_epoch = os.path.join(parent_directory, 'model_last_epoch.pt')
     checkpoint_model_lowest_loss = os.path.join(parent_directory, 'model_lowest_loss.pt')
     checkpoint_model_highest_metric = os.path.join(parent_directory, 'model_highest_metric.pt')
-    # checkpoint_model = os.path.join(parent_directory, checkpoint_file_name)
     os.makedirs(parent_directory, exist_ok=True)
     logging.info(f'project directory: {parent_directory}')
 
@@ -217,8 +216,8 @@ if __name__ == "__main__":
 
     # Copy config file to project_dir, to be able to reproduce the experiment
     copy_config_path = os.path.join(parent_directory, 'config.yaml')
-    # shutil.copy(args.config, copy_config_path)
-    # # Dump the modified config to the copied config file
+    
+    # Dump the modified config to the copied config file
     with open(copy_config_path, 'w') as config_file:
         yaml.dump(unmunchify(config), config_file, default_flow_style=False, sort_keys=True)
 
@@ -286,7 +285,7 @@ if __name__ == "__main__":
         steps_per_epoch  = len(train_dataloader)
         config.scheduler["steps_per_epoch"]=steps_per_epoch
 
-    mm = ModelManager(config, ModelClass)
+    mm = ModelManager(config, ModelClass, results_store)
     mm.net = torch.compile(mm.net)
     if config.trainer.reload:
         if not os.path.exists(config.trainer.checkpoint):
@@ -345,7 +344,6 @@ if __name__ == "__main__":
         
         if type(config.data_loader.KFold.splits) is str:
             path_files = config.data_loader.KFold.splits
-            # sorted(os.listdir(path_files))
             lista_voci = os.listdir(path_files)
             splits = sorted([os.path.join(path_files,f) for f in lista_voci if os.path.isfile(os.path.join(path_files, f))])
         else:
@@ -355,7 +353,6 @@ if __name__ == "__main__":
             test_scenarios = config.missing_modality_test.scenarios
             for i_scenario, scenario in enumerate(test_scenarios):   
                 print('Testing the model with missing modality scenario:', scenario)
-                # print(f'SPLITS ORDER: {splits}')
                 for i, split_path in enumerate(splits):            
                     foldname = f"Fold_{i+1}"
                     logging.info(f'Fold {i+1}...')
@@ -395,18 +392,10 @@ if __name__ == "__main__":
                                 log_on_telegram = log_on_telegram,
                                 Save_XA_attention_files = config.trainer.Save_XA_attention_files,
                                 eval_missing_modality_scenario = scenario,
-                                print_demo_results = args.demo and i_scenario==len(test_scenarios)-1 and i==len(splits)-1 ,
-                                is_demo=args.demo)
-        # mm.evaluate(test_dataloader, 
-        #             task_type=config.data_loader.task_type, 
-        #             checkpoint_last_epoch=checkpoint_last_epoch, 
-        #             checkpoint_model_highest_metric=checkpoint_model_highest_metric,
-        #             checkpoint_model_lowest_loss=checkpoint_model_lowest_loss,
-        #             best=True, 
-        #             device=config.model.device, 
-        #             path=f"{parent_directory}",
-        #             Save_XA_attention_files = config.trainer.Save_XA_attention_files)
-
+                                print_demo_results = args.demo_test and i_scenario==len(test_scenarios)-1 and i==len(splits)-1 ,
+                                is_demo_test=args.demo_test,
+                                repo_path=repo_dir)
+                    
     # Test the model
     if config.trainer.do_inference:
         logging.info('Inference...')
@@ -417,14 +406,14 @@ if __name__ == "__main__":
                     checkpoint_model_lowest_loss=checkpoint_model_lowest_loss,
                     device=config.model.device, 
                     path=f"{parent_directory}",
-                    Save_XA_attention_files = config.trainer.Save_XA_attention_files)
+                    Save_XA_attention_files = config.trainer.Save_XA_attention_files,
+                    repo_path=repo_dir)
 
     if config.trainer.do_kfold:
         logging.info('K-Fold...')
 
         if type(config.data_loader.KFold.splits) is str:
             path_files = config.data_loader.KFold.splits
-            # sorted(os.listdir(path_files))
             lista_voci = os.listdir(path_files)
             splits = sorted([os.path.join(path_files,f) for f in lista_voci if os.path.isfile(os.path.join(path_files, f))])
         else:
@@ -477,9 +466,7 @@ if __name__ == "__main__":
                 else:
                     test_patients = split_df["test"].dropna().values.astype(str)
                     val_patients = None
-                    len_val = 0
-                
-            
+                    len_val = 0                     
             
             if "Genomics" in config.model.kwargs.input_modalities:
                 dataset.normalize_genomics(train_patients, val_patients, test_patients)
@@ -503,7 +490,7 @@ if __name__ == "__main__":
             if config.scheduler.name=="OneCycleLR":
                 steps_per_epoch  = len(train_dataloader)
                 config.scheduler["steps_per_epoch"]=steps_per_epoch
-            mm = ModelManager(config, ModelClass)
+            mm = ModelManager(config, ModelClass, results_store)
             mm.train(train_dataloader, 
                         val_dataloader, 
                         test_dataloader, 
@@ -529,13 +516,14 @@ if __name__ == "__main__":
                         kfold=foldname,
                         log_aggregated = i==len(splits)-1,
                         log_on_telegram = log_on_telegram,
-                        Save_XA_attention_files = config.trainer.Save_XA_attention_files,)
+                        Save_XA_attention_files = config.trainer.Save_XA_attention_files,
+                        repo_path=repo_dir)
             
             if config.missing_modality_test.active:
                 test_scenarios = config.missing_modality_test.scenarios
                 for i_scenario, scenario in enumerate(test_scenarios):
                     print('Testing the model with missing modality scenario:', scenario)
-
+                    
                     mm.evaluate(test_dataloader, 
                                 task_type=config.data_loader.task_type, 
                                 checkpoint_last_epoch=checkpoint_last_epoch, 
@@ -548,7 +536,9 @@ if __name__ == "__main__":
                                 log_aggregated = i==len(splits)-1,
                                 log_on_telegram = log_on_telegram,
                                 Save_XA_attention_files = config.trainer.Save_XA_attention_files,
-                                eval_missing_modality_scenario = scenario,)
+                                print_demo_results = args.demo_training and i_scenario==len(test_scenarios)-1 and i==len(splits)-1 ,
+                                eval_missing_modality_scenario = scenario,
+                                repo_path=repo_dir)
 
     end_time = time.time() 
     execution_time = end_time - start_time
