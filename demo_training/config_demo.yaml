@@ -110,5 +110,5 @@ trainer:
   epochs: 2
   patience: 20
   AEM_lamda: 0.3
-  Save_XA_attention_files: True
+  Save_XA_attention_files: False
   grid_search_versions_path: grid_search/models_versions

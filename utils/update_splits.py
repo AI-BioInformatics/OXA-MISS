@@ -3,7 +3,7 @@ import os
 import numpy as np
 
 
-def process_csv_files(root_dir='/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/utils/splits_train_val_test'):
+def process_csv_files(root_dir='utils/splits_train_val_test'):
     # Walk through all directories in splits folder
     for dataset_dir in os.listdir(root_dir):
         dataset_path = os.path.join(root_dir, dataset_dir)

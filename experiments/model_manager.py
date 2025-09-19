@@ -476,10 +476,10 @@ class ModelManager():
             tloss = np.mean(tloss) # bisognerebbe cambiarlo in base alla reduction della loss
             trainLoss.append(tloss)
             train_df = pd.DataFrame(log_dict)            
-            train_df.to_hdf(f"{path}/train_df{df_fold_suffix}.h5", key="df", mode="w")
+            # train_df.to_hdf(f"{path}/train_df{df_fold_suffix}.h5", key="df", mode="w")
             train_metrics_dict = self.compute_metrics_df(train_df, task_type)
             train_metrics_df = pd.DataFrame(train_metrics_dict, index=[0])
-            train_metrics_df.to_csv(f"{path}/train_metrics{df_fold_suffix}.csv")
+            # train_metrics_df.to_csv(f"{path}/train_metrics{df_fold_suffix}.csv")
             if task_type == "Treatment_Response":
                 train_confusion_matrix = accuracy_confusionMatrix_plot(log_dict, train_metrics_df)
             # self.KaplanMeier_plot(log_dict, train_dataloader.dataset.dataset.bins.astype(int))
@@ -538,7 +538,7 @@ class ModelManager():
                 # vloss = np.sum(vloss)
                 validationLoss.append(vloss)
                 val_df = pd.DataFrame(log_dict)                
-                val_df.to_hdf(f"{path}/val_df{df_fold_suffix}.h5", key="df", mode="w")
+                # val_df.to_hdf(f"{path}/val_df{df_fold_suffix}.h5", key="df", mode="w")
                 val_metrics_dict = self.compute_metrics_df(val_df, task_type)
                 if task_type == "Treatment_Response":
                     val_metric_monitor = (val_metrics_dict['AUC'] + val_metrics_dict['F1-Score']) / 2 
@@ -546,7 +546,7 @@ class ModelManager():
                     val_metric_monitor = val_metrics_dict["c-index"]
                                 
                 val_metrics_df = pd.DataFrame(val_metrics_dict, index=[0])
-                val_metrics_df.to_csv(f"{path}/val_metrics{df_fold_suffix}.csv")
+                # val_metrics_df.to_csv(f"{path}/val_metrics{df_fold_suffix}.csv")
                 if task_type == "Treatment_Response":
                     val_confusion_matrix = accuracy_confusionMatrix_plot(log_dict, val_metrics_df)
                 for key, value in val_metrics_dict.items():
@@ -590,17 +590,14 @@ class ModelManager():
                 # ttloss = np.sum(ttloss)
                 testLoss.append(ttloss)
                 test_df = pd.DataFrame(log_dict)                
-                test_df.to_hdf(f"{path}/test_df{df_fold_suffix}.h5", key="df", mode="w")
+                # test_df.to_hdf(f"{path}/test_df{df_fold_suffix}.h5", key="df", mode="w")
                 test_metrics_dict = self.compute_metrics_df(test_df, task_type)
                 test_metrics_df = pd.DataFrame(test_metrics_dict, index=[0])
-                test_metrics_df.to_csv(f"{path}/test_metrics{df_fold_suffix}.csv")
+                # test_metrics_df.to_csv(f"{path}/test_metrics{df_fold_suffix}.csv")
                 if task_type == "Treatment_Response":
                     test_confusion_matrix = accuracy_confusionMatrix_plot(log_dict, test_metrics_df)
 
-                test_log = {
-                    # f'Test/Loss': ttloss,
-                    # f'Test/c-index': test_metrics_dict["c-index"],    
-                    } 
+                test_log = {} 
                 for key, value in test_metrics_dict.items():
                     test_log[f'Test{log_fold_string}/{key}'] = value
                 
@@ -657,10 +654,10 @@ class ModelManager():
                         # ttloss = np.sum(ttloss)
                         testLoss.append(ttloss)
                         test_df = pd.DataFrame(log_dict)                
-                        test_df.to_hdf(f"{path}/test_df{df_fold_suffix}{emms_suffix}.h5", key="df", mode="w")
+                        # test_df.to_hdf(f"{path}/test_df{df_fold_suffix}{emms_suffix}.h5", key="df", mode="w")
                         test_metrics_dict = self.compute_metrics_df(test_df, task_type)
                         test_metrics_df = pd.DataFrame(test_metrics_dict, index=[0])
-                        test_metrics_df.to_csv(f"{path}/test_metrics{df_fold_suffix}{emms_suffix}.csv")
+                        # test_metrics_df.to_csv(f"{path}/test_metrics{df_fold_suffix}{emms_suffix}.csv")
                         if task_type == "Treatment_Response":
                             test_confusion_matrix = accuracy_confusionMatrix_plot(log_dict, test_metrics_df)
 
@@ -704,14 +701,14 @@ class ModelManager():
                         wandb.run.summary[f"Highest_Metric/Valid{log_fold_string}/{key}"] = value
                         
                     
-                    train_df.to_hdf(f"{path}/best_train_df_highest_metric{df_fold_suffix}.h5", key="df", mode="w")
-                    train_metrics_df.to_csv(f"{path}/best_train_metrics_highest_metric{df_fold_suffix}.csv")
+                    # train_df.to_hdf(f"{path}/best_train_df_highest_metric{df_fold_suffix}.h5", key="df", mode="w")
+                    # train_metrics_df.to_csv(f"{path}/best_train_metrics_highest_metric{df_fold_suffix}.csv")
 
-                    val_df.to_hdf(f"{path}/best_val_df_highest_metric{df_fold_suffix}.h5", key="df", mode="w")
-                    val_metrics_df.to_csv(f"{path}/best_val_metrics_highest_metric{df_fold_suffix}.csv")  
+                    # val_df.to_hdf(f"{path}/best_val_df_highest_metric{df_fold_suffix}.h5", key="df", mode="w")
+                    # val_metrics_df.to_csv(f"{path}/best_val_metrics_highest_metric{df_fold_suffix}.csv")  
 
-                    test_df.to_hdf(f"{path}/best_test_df_highest_metric{df_fold_suffix}.h5", key="df", mode="w")
-                    test_metrics_df.to_csv(f"{path}/best_test_metrics_highest_metric{df_fold_suffix}.csv") 
+                    # test_df.to_hdf(f"{path}/best_test_df_highest_metric{df_fold_suffix}.h5", key="df", mode="w")
+                    # test_metrics_df.to_csv(f"{path}/best_test_metrics_highest_metric{df_fold_suffix}.csv") 
 
                 if vloss < lowest_val_loss:
                     lowest_val_loss = vloss
@@ -731,14 +728,14 @@ class ModelManager():
                     for key, value in val_metrics_dict.items():
                         wandb.run.summary[f"Lowest_Validation_Loss/Valid{log_fold_string}/{key}"] = value
                     # # wandb.run.summary["Lowest_Validation_Loss/Validation_KM"] = val_metrics_dict["KM"],
-                    train_df.to_hdf(f"{path}/best_train_df_lowest_loss{df_fold_suffix}.h5", key="df", mode="w")
-                    train_metrics_df.to_csv(f"{path}/best_train_metrics_lowest_loss{df_fold_suffix}.csv")
+                    # train_df.to_hdf(f"{path}/best_train_df_lowest_loss{df_fold_suffix}.h5", key="df", mode="w")
+                    # train_metrics_df.to_csv(f"{path}/best_train_metrics_lowest_loss{df_fold_suffix}.csv")
 
-                    val_df.to_hdf(f"{path}/best_val_df_lowest_loss{df_fold_suffix}.h5", key="df", mode="w")
-                    val_metrics_df.to_csv(f"{path}/best_val_metrics_lowest_loss{df_fold_suffix}.csv")      
+                    # val_df.to_hdf(f"{path}/best_val_df_lowest_loss{df_fold_suffix}.h5", key="df", mode="w")
+                    # val_metrics_df.to_csv(f"{path}/best_val_metrics_lowest_loss{df_fold_suffix}.csv")      
 
-                    test_df.to_hdf(f"{path}/best_test_df_lowest_loss{df_fold_suffix}.h5", key="df", mode="w")
-                    test_metrics_df.to_csv(f"{path}/best_test_metrics_lowest_loss{df_fold_suffix}.csv")    
+                    # test_df.to_hdf(f"{path}/best_test_df_lowest_loss{df_fold_suffix}.h5", key="df", mode="w")
+                    # test_metrics_df.to_csv(f"{path}/best_test_metrics_lowest_loss{df_fold_suffix}.csv")    
 
                 elif patience_counter == self.config.trainer.patience:
                     logging.info(f"End of training phase - Patience threshold reached\nWeights Restored from Lowest val_loss epoch: {lowest_val_loss_epoch}\nlowest_val_loss: {lowest_val_loss}")
