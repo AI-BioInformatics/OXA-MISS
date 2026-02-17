@@ -198,8 +198,8 @@ splits/TITAN*
 
 
 
-demo_test
-demo_training
+demo_test/*
+demo_training/*
 stats/patches_all_tissues.txt
 stats/patches.txt
 utils/create_missingmodalitiestables_chemorefractory.py
