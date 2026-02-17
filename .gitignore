@@ -94,7 +94,8 @@ target/
 profile_default/
 ipython_config.py
 
-
+config/*
+grid_search/*
 config/datasets/*Decider*
 config/all_experiments
 # pyenv
@@ -196,6 +197,9 @@ splits/Treatment_Response
 splits/TITAN*
 
 
+
+demo_test
+demo_training
 stats/patches_all_tissues.txt
 stats/patches.txt
 utils/create_missingmodalitiestables_chemorefractory.py
@@ -227,3 +231,6 @@ config/datasets/Slide_Decider_dataset_TR_chemorefractory_all_tissues.yaml
 config/datasets/Slide_Decider_dataset_TR_chemorefractory.yaml
 config/datasets/Slide_TR_PTRC-HGSOC_all_tissues.yaml
 config/datasets/Slide_TR_PTRC-HGSOC.yaml
+
+
+*.sh
