@@ -197,8 +197,9 @@ splits/Treatment_Response
 splits/TITAN*
 
 
-
+demo_test
 demo_test/*
+demo_test/checkpoints_KIRC
 demo_training/*
 stats/patches_all_tissues.txt
 stats/patches.txt
