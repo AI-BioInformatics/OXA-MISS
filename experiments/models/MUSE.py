@@ -302,6 +302,7 @@ class MUSE(nn.Module):
     def __init__(
             self,
             embedding_size=64,
+            input_dim=1024,
             dropout=0.25,
             ffn_layers=2,
             gnn_layers=2,
@@ -325,6 +326,7 @@ class MUSE(nn.Module):
                 raise ValueError(f"Mismatch between genomics_group_name ({len(genomics_group_name)}) and genomics_group_dropout lengths ({len(genomics_group_dropout)})")
 
         self.embedding_size = embedding_size
+        self.input_dim=input_dim
         self.dropout = dropout
         self.ffn_layers = ffn_layers
         self.gnn_layers = gnn_layers
@@ -337,7 +339,7 @@ class MUSE(nn.Module):
 
         self.dropout_layer = nn.Dropout(dropout)
 
-        self.x1_encoder = ABMIL(output_dim=embedding_size)
+        self.x1_encoder = ABMIL(input_dim=input_dim,output_dim=embedding_size)
         # self.x1_mapper = nn.Linear(embedding_size, embedding_size)
 
         # self.x2_encoder = FFNEncoder(input_dim=227,

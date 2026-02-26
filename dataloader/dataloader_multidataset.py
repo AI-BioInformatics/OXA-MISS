@@ -9,6 +9,7 @@ from .dataloader_utils import extract_names
 import yaml
 from munch import munchify, unmunchify, Munch
 import json
+import glob
 
 
 
@@ -29,7 +30,7 @@ class Multimodal_Bio_Dataset(Dataset):
                         missing_mod_rate=None,
 
                         missing_modality_test_scenarios=[],
-                        input_modalities=['WSI', 'Genomics', 'CNV'],
+                        input_modalities=['WSI', 'Genomics', 'CNV','CT'],
                         missing_modality_table=None,
                         model_name=None,
                         ):
@@ -58,6 +59,8 @@ class Multimodal_Bio_Dataset(Dataset):
             self.datasets[config.name] = config.parameters # asser config.name in datasets
                        
             dataframe = pd.read_csv(config.parameters.dataframe_path, sep="\t",dtype={'case_id': str})
+            cols_to_keep = ['case_id','slide_id', 'FUT', 'Survival', 'True_Label',"Treatment_Response"] # keep only relevant columns for now, rename later
+            dataframe= dataframe[dataframe.columns.intersection(cols_to_keep)]
             dataframe = dataframe.dropna()
             dataframe["dataset_name"] = [config.name for _ in range(len(dataframe))]
             if task_type == "Survival":
@@ -91,23 +94,44 @@ class Multimodal_Bio_Dataset(Dataset):
                     missing_modalities_table = pd.read_csv(config.parameters.missing_modalities_table_path)
                     if hasattr(self, 'missing_modalities_table'):
                         new_rows = missing_modalities_table[~missing_modalities_table['case_id'].isin(self.missing_modalities_table['case_id'])]
-                        self.missing_modalities_table = pd.concat([self.missing_modalities_table, new_rows], ignore_index=True)
+                        if not new_rows.empty:
+                            self.missing_modalities_table = pd.concat([self.missing_modalities_table, new_rows], ignore_index=True)
                         self.missing_modalities_table["dataset_name"] = [config.name for _ in range(len(self.missing_modalities_table))]
                         self.missing_modalities_table.rename(columns=rename_dict, inplace=True)
+                        if 'slide_id' in self.missing_modalities_table.columns:
+                            self.missing_modalities_table.drop(columns=['slide_id'],inplace=True)
                         self.missing_modalities_table = self.missing_modalities_table.dropna()
                         self.missing_modalities_table['time'] = self.missing_modalities_table['time'].astype(int)
+                        self.missing_modalities_table["dataset_name"] = [config.name for _ in range(len(self.missing_modalities_table))]
+                        self.missing_modalities_table.rename(columns=rename_dict, inplace=True)
                                                 
                     else:
                         self.missing_modalities_table = missing_modalities_table
                         self.missing_modalities_table["dataset_name"] = [config.name for _ in range(len(self.missing_modalities_table))]
                         self.missing_modalities_table.rename(columns=rename_dict, inplace=True)
+                        
                         self.missing_modalities_table = self.missing_modalities_table.dropna()
                         self.missing_modalities_table['time'] = self.missing_modalities_table['time'].astype(int)
                         
                 else:
                     raise ValueError("Missing modalities table path not found in dataset config file")
-                 
-
+            
+            if hasattr(config.parameters,'ct_path'):
+                self.ct_path=config.parameters.ct_path
+                self.ct_chosen=pd.read_csv('/work/H2020DeciderFicarra/ccRCC/CT_mapping.csv')
+                
+            if hasattr(config.parameters,'mri_path'):
+                self.mri_path=config.parameters.mri_path
+                self.mri_chosen=pd.read_csv('/work/H2020DeciderFicarra/ccRCC/MRI_mapping.csv')
+            if hasattr(config.parameters,'clinical_path'):
+                self.clinical_path=config.parameters.clinical_path
+                self.clinical_data=pd.read_csv(self.clinical_path)
+                CLINGEN_COLS = ['case_id','gender','age_diag','grade','cancer_history', 
+                    'ajcc_path_tumor_pt','ajcc_path_nodes_pn','ajcc_clin_metastasis_cm',
+                    'ajcc_path_metastasis_pm','ajcc_path_tumor_stage','race_Asian','race_Black or African American',
+                    'race_Hispanic or Latino','race_White','race_other']
+                self.clinical_data = self.clinical_data[CLINGEN_COLS]
+                self.clinical_data = self.clinical_data.set_index('case_id')
             if hasattr(config.parameters, 'genomics_path'):
                 genomics_path = config.parameters.genomics_path
                 if genomics_path.endswith(".tsv"):
@@ -161,7 +185,7 @@ class Multimodal_Bio_Dataset(Dataset):
             else:
                 self.dataframe = pd.concat([self.dataframe, dataframe], ignore_index=True)
                 if hasattr(config.parameters, 'genomics_path'):
-                    self.genomics = pd.concat([self.genomics, genomics], ignore_index=True)
+                    self.genomics = pd.concat([self.genomics, genomics], ignore_index=False)
                 if hasattr(config.parameters, 'cnv_path'):
                     self.cnv = pd.concat([self.cnv, cnv], ignore_index=True)
                        
@@ -222,8 +246,22 @@ class Multimodal_Bio_Dataset(Dataset):
             if not nan_counts.empty:
                 print("[❗] Found NaN values after merge:")
                 print(nan_counts)
-    
-
+    # --- FILTRO PAZIENTI VUOTI ---
+        print(f"Filtering patients based on input modalities: {self.input_modalities}...")
+        initial_count = len(self.patient_df)
+        
+        valid_patients = []
+        for pid in self.patient_df.index:
+            if self._is_patient_valid(pid):
+                valid_patients.append(True)
+            else:
+                valid_patients.append(False)
+        
+        self.patient_df = self.patient_df[valid_patients]
+        
+        removed_count = initial_count - len(self.patient_df)
+        print(f" Filter complete. Removed {removed_count} empty patients. Remaining: {len(self.patient_df)}")
+        
         ############################
         # maybe wrap this into a function
         # self.patient_df = self.patient_df[self.patient_df.index.isin(self.genomics.index)]
@@ -234,7 +272,48 @@ class Multimodal_Bio_Dataset(Dataset):
             self._compute_labels()
         else:
             self.patient_df["label"] = self.patient_df["Treatment_Response"]
+        
         print("Dataset loaded with {} slides and {} patients".format(len(self.dataframe), len(self.patient_df)))
+        
+    def _is_patient_valid(self, case_id):
+        """Verifica se il paziente ha almeno una modalità valida tra quelle richieste."""
+        has_any_data = False
+        
+        # Check WSI
+        if 'WSI' in self.input_modalities:
+            slide_list = self.patient_dict.get(case_id, [])
+            # Verifica se esiste almeno un file .pt su disco per queste slide
+            # (Usa una logica simile a quella che hai in __getitem__)
+            if len(slide_list) > 0:
+                has_any_data = True
+
+        # Check Genomics
+        if not has_any_data and 'Genomics' in self.input_modalities:
+                if hasattr(self, 'genomics') and case_id in self.genomics.index:
+                    has_any_data = True
+
+            # Check CNV
+        if not has_any_data and 'CNV' in self.input_modalities:
+            if hasattr(self, 'cnv') and case_id in self.cnv.index:
+                has_any_data = True
+
+        # Check CT
+        if not has_any_data and 'CT' in self.input_modalities:
+            if hasattr(self, 'ct_chosen') and not self.ct_chosen[self.ct_chosen['case_id'] == case_id].empty:
+                has_any_data = True
+
+        # Check MRI
+        if not has_any_data and 'MRI' in self.input_modalities:
+            if hasattr(self, 'mri_chosen') and not self.mri_chosen[self.mri_chosen['case_id'] == case_id].empty:
+                has_any_data = True
+
+        # Check Clinical
+        if not has_any_data and 'Clinical' in self.input_modalities:
+            if hasattr(self, 'clinical_data') and case_id in self.clinical_data.index:
+                has_any_data = True
+
+        return has_any_data
+
 
     def filter_by_tissue_type(self, dataset_name, dataframe, tissue_type_filter):
         if dataset_name == "Decider":
@@ -243,9 +322,14 @@ class Multimodal_Bio_Dataset(Dataset):
         return dataframe
 
     def _compute_patient_dict(self):
+        if self.model_name == 'SurvPath':
+            self.missing_modalities_table=self.missing_modalities_table[self.missing_modalities_table['complete']==True]
+            self.dataframe = self.dataframe[self.dataframe[self.case_id_name].isin(self.missing_modalities_table[self.case_id_name].unique())]
+
         if len(list(self.dataframe[self.case_id_name].unique())) > len(list(self.missing_modalities_table[self.case_id_name].unique())):
             self.patient_list = list(self.dataframe[self.case_id_name].unique())
             self.patient_dict = {patient: list(self.dataframe[self.dataframe[self.case_id_name] == patient][self.slide_id_name]) for patient in self.patient_list}
+        
         elif len(list(self.dataframe[self.case_id_name].unique())) <= len(list(self.missing_modalities_table[self.case_id_name].unique())):
             self.dataframe[self.case_id_name] = self.dataframe[self.case_id_name].astype(str).str.strip()
             self.missing_modalities_table[self.case_id_name] = self.missing_modalities_table[self.case_id_name].astype(str).str.strip()            
@@ -258,14 +342,31 @@ class Multimodal_Bio_Dataset(Dataset):
             }
 
     def _compute_patient_df(self):
-        if len(list(self.dataframe[self.case_id_name].unique())) > len(list(self.missing_modalities_table[self.case_id_name].unique())):
-            self.patient_df = self.dataframe.drop_duplicates(subset=self.case_id_name)
-            self.patient_df = self.patient_df.reset_index(drop=True)    
-            self.patient_df = self.patient_df.set_index(self.case_id_name, drop=False)
-        elif len(list(self.dataframe[self.case_id_name].unique())) <= len(list(self.missing_modalities_table[self.case_id_name].unique())):
-            self.patient_df = self.missing_modalities_table.drop_duplicates(subset=self.case_id_name)
-            self.patient_df = self.patient_df.reset_index(drop=True)    
-            self.patient_df = self.patient_df.set_index(self.case_id_name, drop=False)
+        # if len(list(self.dataframe[self.case_id_name].unique())) > len(list(self.missing_modalities_table[self.case_id_name].unique())):
+        self.patient_df = self.dataframe.drop_duplicates(subset=self.case_id_name)
+        self.patient_df = self.patient_df.reset_index(drop=True)    
+        self.patient_df = self.patient_df.set_index(self.case_id_name, drop=False)
+    # elif len(list(self.dataframe[self.case_id_name].unique())) <= len(list(self.missing_modalities_table[self.case_id_name].unique())):
+        #     unique_missing = self.missing_modalities_table.drop_duplicates(subset=self.case_id_name)
+    
+        #     # 2. Creiamo una versione "leggera" del dataframe principale con le info che ci servono
+        #     # Usiamo case_id (già rinominato) e dataset_name
+        #     main_info = self.dataframe[[self.case_id_name, 'dataset_name']].drop_duplicates(subset=self.case_id_name)
+            
+        #     # 3. Facciamo il merge. Questo aggiungerà 'dataset_name' alla tabella delle modalità
+        #     # Usiamo il rename preventivo per FUT/Survival se servono dopo
+        #     rename_dict = {'FUT': 'time', 'Survival': 'censorship'}
+        #     unique_missing = unique_missing.rename(columns=rename_dict)
+    
+        #     self.patient_df = pd.merge(
+        #         unique_missing,
+        #         main_info,
+        #         on=self.case_id_name,
+        #         how='left' # Mantiene tutti i pazienti di unique_missing e aggiunge dataset_name dove lo trova
+        #     )
+        #     # self.patient_df = self.missing_modalities_table.drop_duplicates(subset=self.case_id_name)
+        #     self.patient_df = self.patient_df.reset_index(drop=True)    
+        #     self.patient_df = self.patient_df.set_index(self.case_id_name, drop=False)
 
     def get_train_test_val_splits(self, train_size=0.7, val_size=0.15, test_size=0.15, random_state=42):
         np.random.seed(random_state)
@@ -362,7 +463,7 @@ class Multimodal_Bio_Dataset(Dataset):
 
 
     def _compute_labels(self):
-        uncensored_df = self.patient_df[(self.patient_df["censorship"] == 0) & (self.patient_df['complete'] == True)]
+        uncensored_df = self.patient_df[(self.patient_df["censorship"] == 0)]# & (self.patient_df['complete'] == True)]
         disc_labels, q_bins = pd.qcut(uncensored_df["time"], q=self.n_bins, retbins=True, labels=False, duplicates='drop')
         q_bins[-1] = self.patient_df["time"].max() + self.eps
         q_bins[0] = self.patient_df["time"].min() - self.eps
@@ -405,11 +506,15 @@ class Multimodal_Bio_Dataset(Dataset):
                         num_patches = wsi_bag.shape[0]
                     else:
                         wsi_path = os.path.join(pt_files_path, '{}.pt'.format(slide_id))
+                        if not os.path.exists(wsi_path):
+                            wsi_path=glob.glob(os.path.join(pt_files_path, f'{slide_id}*.pt'))[0]
                         wsi_bag = torch.load(wsi_path, weights_only=True, map_location="cpu")
                         self.slides_cache[slide_id] = wsi_bag
                         num_patches = wsi_bag.shape[0]
                 else:
                     wsi_path = os.path.join(pt_files_path, '{}.pt'.format(slide_id))
+                    if not os.path.exists(wsi_path):
+                        wsi_path=glob.glob(os.path.join(pt_files_path, f'{slide_id}*.pt'))[0]
                     wsi_bag = torch.load(wsi_path, weights_only=True, map_location="cpu") # changed to True due to python warning
                     num_patches = wsi_bag.shape[0]
                 patch_features.append(wsi_bag)
@@ -458,6 +563,9 @@ class Multimodal_Bio_Dataset(Dataset):
     def __getitem__(self, index):
         # Retrieve data from the dataframe based on the index
         row  = self.patient_df.loc[index]
+        ct_feats = torch.zeros((1, 512))
+        mri_feats = torch.zeros((1, 512))
+        clinical_feats = torch.zeros(14)
         if isinstance(row, pd.DataFrame):
             print("⚠️ Più righe trovate con index, uso solo la prima:")
             row = row.iloc[0]
@@ -513,7 +621,32 @@ class Multimodal_Bio_Dataset(Dataset):
                     cnv_status = True
             else:
                 cnv_status = False
-
+        if hasattr(self, 'ct_path'):
+            if self.ct_chosen[self.ct_chosen['case_id']==index].empty or not 'CT' in self.input_modalities:
+                ct_feats = torch.zeros((1,512), dtype=torch.float32)  
+                ct_status = False
+            else:
+                ct_sample = os.path.join(self.ct_path, self.ct_chosen[self.ct_chosen['case_id']==index]['chosen_exam'].values[0])
+                ct_feats=np.squeeze(np.load(ct_sample)['arr_0'],axis=(1,3))
+                ct_feats=torch.from_numpy(ct_feats)
+                ct_status = True
+        if hasattr(self, 'mri_path'):
+            if self.mri_chosen[self.mri_chosen['case_id']==index].empty or not 'MRI' in self.input_modalities:
+                mri_feats = torch.zeros((1,512), dtype=torch.float32)  
+                mri_status = False
+            else:
+                mri_sample = os.path.join(self.mri_path, self.mri_chosen[self.mri_chosen['case_id']==index]['chosen_exam'].values[0])
+                mri_feats=np.squeeze(np.load(mri_sample)['arr_0'],axis=(1,3))  
+                mri_feats=torch.from_numpy(mri_feats) 
+                mri_status = True
+        if hasattr(self, 'clinical_path'):
+            if index not in self.clinical_data.index or not 'Clinical' in self.input_modalities:
+                clinical_feats = torch.zeros((1,self.clinical_data.shape[1]), dtype=torch.float32)  
+                clinical_status = False
+            else:
+                clinical_feats = self.clinical_data.loc[index].values.astype(np.float32)
+                clinical_feats = torch.tensor(clinical_feats)
+                clinical_status = True
         if self.robust_training:
             if WSI_status and genomics_status:
                 # 66% chance to remove WSI or genomics
@@ -526,11 +659,17 @@ class Multimodal_Bio_Dataset(Dataset):
                         genomics_status = False
 
         dataset_name = row["dataset_name"]
+        # if self.patient_df.loc[index].case_id== 'TCGA-BP-4341':
+        #     print("DEBUG: Trovato paziente TCGA-BP-4341! Controlla")
         tissue_type_filter = self.datasets[dataset_name].tissue_type_filter
         slide_list = self.patient_dict[row[self.case_id_name]]
+        size_start=len(slide_list)
+        slide_list = [slide for slide in slide_list if len(glob.glob(os.path.join(self.datasets[dataset_name].pt_files_path, f'{slide}*.pt'))) > 0]
+        if len(slide_list) < size_start:
+            print(f"[⚠️] {size_start - len(slide_list)} slides for patient {row[self.case_id_name]} were not found on disk and will be skipped.")
         if dataset_name == "Decider":
             slide_list = [slide for slide in slide_list if self.get_tissue_type(slide) in tissue_type_filter]
-        if len(slide_list) == 0:
+        if len(slide_list) == 0 or not 'WSI' in self.input_modalities:
             WSI_status = False
             patch_features = torch.zeros((self.max_patches, 1024))  # Assuming
             mask = torch.zeros(self.max_patches)
@@ -565,7 +704,7 @@ class Multimodal_Bio_Dataset(Dataset):
                         missing_modality_test_scenarios_dict[scenario_modality] = True
                     else:
                         missing_modality_test_scenarios_dict[scenario_modality] = False
-        
+
         data = {
                 'input':{   
                             'patch_features': patch_features, 
@@ -575,7 +714,12 @@ class Multimodal_Bio_Dataset(Dataset):
                             'WSI_status': WSI_status,
                             'genomics_status': genomics_status,
                             'cnv_status': cnv_status,
-
+                            'ct_features': ct_feats,
+                            'ct_status': ct_status,
+                            'mri_features': mri_feats,
+                            'mri_status': mri_status,
+                            "clinical_features": clinical_feats,
+                            "clinical_status": clinical_status,
                             'missing_modality_test_scenarios': missing_modality_test_scenarios_dict,
                             'label': label, 
                             'censorship': censorship,

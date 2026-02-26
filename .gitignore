@@ -235,3 +235,4 @@ config/datasets/Slide_TR_PTRC-HGSOC.yaml
 
 
 *.sh
+grid_search/run_grid_search.sh

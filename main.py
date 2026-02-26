@@ -165,8 +165,9 @@ if __name__ == "__main__":
 
     # Check if project_dir exists
     if not os.path.exists(config.project_dir):
-        logging.error("Project_dir does not exist: {}".format(config.project_dir))
-        raise SystemExit
+        os.makedirs(config.project_dir, exist_ok=True)
+        # logging.error("Project_dir does not exist: {}".format(config.project_dir))
+        # raise SystemExit
 
     # check if preprocessing is set and file exists
     logging.info(f'loading preprocessing')
@@ -395,7 +396,47 @@ if __name__ == "__main__":
                                 print_demo_results = args.demo_test and i_scenario==len(test_scenarios)-1 and i==len(splits)-1 ,
                                 is_demo_test=args.demo_test,
                                 repo_path=repo_dir)
-                    
+        else:
+            for i, split_path in enumerate(splits):            
+                    foldname = f"Fold_{i+1}"
+                    logging.info(f'Fold {i+1}...')
+                    split_df = pd.read_csv(split_path)
+                    has_val = "val" in split_df.columns and split_df['val'].notnull().any()
+                    has_test = "test" in split_df.columns and split_df['test'].notnull().any()
+                    if not has_val and not has_test:
+                        raise ValueError(f"Fold {split_path} has no test patients")
+                    if has_test:
+                        test_patients = split_df["test"].dropna().values.astype(str)
+                    else:
+                        test_patients = split_df["val"].dropna().values.astype(str)
+
+                    train_dataloader, val_dataloader, test_dataloader = get_dataloaders(    
+                                                                                    dataset=dataset,
+                                                                                    train_patients=None, 
+                                                                                    val_patients=None, 
+                                                                                    test_patients=test_patients,
+                                                                                    config=config
+                                                                                )
+
+                    checkpoint_last_epoch=os.path.join(config.trainer.checkpoint,f'model_last_epoch_Fold_{i+1}.pt')
+                    checkpoint_model_lowest_loss = os.path.join(config.trainer.checkpoint, f'model_lowest_loss_Fold_{i+1}.pt')
+                    checkpoint_model_highest_metric = os.path.join(config.trainer.checkpoint, f'model_highest_metric_Fold_{i+1}.pt') 
+                    log_on_telegram = False if not hasattr(config, 'log_on_telegram') else config.log_on_telegram
+
+                    mm.evaluate(test_dataloader, 
+                        task_type=config.data_loader.task_type, 
+                        checkpoint_last_epoch=checkpoint_last_epoch, 
+                        checkpoint_model_highest_metric=checkpoint_model_highest_metric,
+                        checkpoint_model_lowest_loss=checkpoint_model_lowest_loss,
+                        best=True, 
+                        device=config.model.device, 
+                        path=f"{parent_directory}", 
+                        kfold=foldname,
+                        log_aggregated = i==len(splits)-1,
+                        log_on_telegram = log_on_telegram,
+                        Save_XA_attention_files = config.trainer.Save_XA_attention_files,
+                        repo_path=repo_dir)
+                        
     # Test the model
     if config.trainer.do_inference:
         logging.info('Inference...')
@@ -510,7 +551,7 @@ if __name__ == "__main__":
                         checkpoint_last_epoch=checkpoint_last_epoch, 
                         checkpoint_model_highest_metric=checkpoint_model_highest_metric,
                         checkpoint_model_lowest_loss=checkpoint_model_lowest_loss,
-                        best=best, 
+                        best=True, 
                         device=config.model.device, 
                         path=f"{parent_directory}", 
                         kfold=foldname,

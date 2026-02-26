@@ -48,7 +48,26 @@ class BClassifier(nn.Module):
         return C, A, B 
     
 class DSMIL(nn.Module):
-    def __init__(self, input_dim, output_dim):
+    def __init__(self, input_dim, output_dim,
+                 genomics_group_name = [ "tumor_suppression", "oncogenesis","protein_kinases", "cellular_differentiation","cytokines_and_growth"],
+                    genomics_group_input_dim = [82, 313, 496, 331, 427],
+                    genomics_group_dropout =   [0.35],
+                    cnv_group_name = [ "tumor_suppression", "oncogenesis","protein_kinases", "cellular_differentiation","cytokines_and_growth"],
+                    cnv_group_input_dim = [25, 35, 31],
+                    cnv_group_dropout =   [0.2],
+                    inner_dim=256, 
+                    num_latent_queries=2,
+                    wsi_dropout=0,
+                    use_layernorm=False, 
+                    dropout=0.5,
+                    input_modalities = ["WSI", "Genomics"],
+                    fusion_type="sum",
+                    use_WSI_level_embs = False,
+                    WSI_level_embs_fusion_type = "concat" ,
+                    WSI_level_encoder_dropout = 0.2,
+                    WSI_level_encoder_sizes = [768, 40, 3],
+                    WSI_level_encoder_LayerNorm = False ,
+                    ):
         super(DSMIL, self).__init__()
         self.i_classifier = FCLayer(input_dim, output_dim)
         self.b_classifier = BClassifier(input_size=input_dim, output_class=output_dim)

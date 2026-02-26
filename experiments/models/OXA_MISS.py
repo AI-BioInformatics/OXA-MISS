@@ -83,7 +83,7 @@ class OXA_MISS(nn.Module):
                     use_layernorm=False, 
                     dropout=0.5,
                     input_modalities = ["WSI", "Genomics"],
-                    fusion_type="sum",
+                    fusion_type="concatenate",  # sum | concatenate
                     
                     use_WSI_level_embs= False,
                     WSI_level_embs_fusion_type= "concat", # sum | concat
@@ -119,6 +119,7 @@ class OXA_MISS(nn.Module):
         self.cnv_group_dropout = cnv_group_dropout
         self.wsi_dropout = nn.Dropout(wsi_dropout)
         self.dropout = nn.Dropout(dropout)
+       
         if self.use_layernorm:
             self.layernorm = nn.LayerNorm(inner_dim)
             self.layernorm_latent = nn.LayerNorm(inner_dim)
@@ -137,6 +138,25 @@ class OXA_MISS(nn.Module):
         self.cnv_XA = CrossAttentionBlock(inner_dim)
         self.cnv_FF = FeedForwardLayer(inner_dim, inner_dim, inner_dim)
 
+        if 'CT' in self.input_modalities:
+            self.ct_encoder = nn.Sequential(
+                                    nn.Linear(512, inner_dim),
+                                )
+        if 'MRI' in self.input_modalities:
+            self.mri_encoder = nn.Sequential(
+                                    nn.Linear(512, inner_dim),
+                                )
+        if 'Clinical' in self.input_modalities:
+            self.clinical_encoder = nn.Sequential(
+            nn.LayerNorm(14),
+            nn.Linear(14,128),
+            nn.ReLU(),
+            nn.LayerNorm(128),
+            nn.Dropout(0.3),
+            nn.Linear(128,inner_dim),
+            nn.ReLU(), 
+            nn.LayerNorm(inner_dim)
+        )
         if "Genomics" in self.input_modalities:
             self.genomic_encoder = {}
             for name, input_dim, rate in zip(genomics_group_name, genomics_group_input_dim, genomics_group_dropout):
@@ -162,12 +182,14 @@ class OXA_MISS(nn.Module):
         # Output layer
         if fusion_type == "concatenate":
             final_layer_input_dim = 0
-            if "WSI" in input_modalities:
+            for modality in input_modalities:
                 final_layer_input_dim += inner_dim
-            if "Genomics" in input_modalities:
-                final_layer_input_dim += inner_dim
-            if "CNV" in input_modalities:
-                final_layer_input_dim += inner_dim
+            # if "WSI" in input_modalities:
+            #     final_layer_input_dim += inner_dim
+            # if "Genomics" in input_modalities:
+            #     final_layer_input_dim += inner_dim
+            # if "CNV" in input_modalities:
+            #     final_layer_input_dim += inner_dim
         elif fusion_type == "sum":
             final_layer_input_dim = inner_dim
         else:
@@ -202,8 +224,19 @@ class OXA_MISS(nn.Module):
             
             # Apply attention mechanism
             gate = self.sigmoid(self.gate(patch_embeddings))
-
-            
+        if 'CT' in self.input_modalities and data["ct_status"].item() is True:
+            ct_data = data['ct_features'] 
+            if ct_data.ndim == 3 and ct_data.shape[0] == 1:
+                ct_data = ct_data[0]
+            ct_embedding = self.ct_encoder(ct_data)
+        if 'MRI' in self.input_modalities and data["mri_status"].item() is True:
+            mri_data = data['mri_features'] 
+            if mri_data.ndim == 3 and mri_data.shape[0] == 1:
+                mri_data = mri_data[0]
+            mri_embedding = self.mri_encoder(mri_data)
+        if 'Clinical' in self.input_modalities and data["clinical_status"].item() is True:
+            clinical_data = data['clinical_features'] 
+            clinical_embedding = self.clinical_encoder(clinical_data)
         if "Genomics" in self.input_modalities and data["genomics_status"].item() is True:
             genomics = data["genomics"]
             genomics_groups = []
@@ -244,14 +277,14 @@ class OXA_MISS(nn.Module):
             XA_attentions["att_patches_to_genomics"] = att_patches_to_genomics.detach() if att_patches_to_genomics is not None else None
             XA_attentions["att_patches_to_cnv"] =  att_patches_to_cnv.detach() if att_patches_to_cnv is not None else None
             
-            keys = self.W_k(patch_embeddings_updated)
+            keys = self.W_k(patch_embeddings) #(patch_embeddings_updated)
             scores = torch.matmul(latent_queries, keys.transpose(1, 2))
             scores /= torch.sqrt(torch.tensor(keys.size(-1)).float())
             scores = gate.transpose(-1,-2) * scores 
             scores = self.wsi_dropout(scores)
             A_out = scores
             scores = F.softmax(scores, dim=-1)
-            latent = torch.matmul(scores,patch_embeddings_updated)
+            latent = torch.matmul(scores,patch_embeddings) #patch_embeddings_updated)
             latent = latent.flatten(start_dim=1)
 
             #Extract high level features
@@ -266,10 +299,10 @@ class OXA_MISS(nn.Module):
                 y, att_genomics_to_cnv = self.genomics_XA(genomics_embedding, cnv_embedding)
             else:
                 att_genomics_to_cnv = None
-            if "WSI" in self.input_modalities and data["WSI_status"].item() is True:
-                genomics_embedding = genomics_embedding + x
-            if "CNV" in self.input_modalities and data["cnv_status"].item() is True:
-                genomics_embedding = genomics_embedding + y
+            # if "WSI" in self.input_modalities and data["WSI_status"].item() is True:
+            #     genomics_embedding = genomics_embedding + x
+            # if "CNV" in self.input_modalities and data["cnv_status"].item() is True:
+            #     genomics_embedding = genomics_embedding + y
             XA_attentions["att_genomics_to_patches"] = att_genomics_to_patches.detach() if att_genomics_to_patches is not None else None
             XA_attentions["att_genomics_to_cnv"] = att_genomics_to_cnv.detach() if att_genomics_to_cnv is not None else None
 
@@ -295,13 +328,43 @@ class OXA_MISS(nn.Module):
             cnv_embedding = cnv_embedding.sum(dim=1, keepdim=False)
 
         modalities = []
-        if "WSI" in self.input_modalities and data["WSI_status"].item() is True:
-            modalities.append(wsi_embedding)
-        if "Genomics" in self.input_modalities and data["genomics_status"].item() is True:
-            modalities.append(genomics_embedding)
-        if "CNV" in self.input_modalities and data["cnv_status"].item() is True:
-            modalities.append(cnv_embedding)
-
+        if "WSI" in self.input_modalities:
+            if data["WSI_status"].item() is True:
+                modalities.append(wsi_embedding)
+            else:
+                wsi_embedding = torch.zeros((data['patch_features'].shape[0], self.inner_proj.out_features)).to(self.device)
+                modalities.append(wsi_embedding)
+        if "Genomics" in self.input_modalities:
+            if data["genomics_status"].item() is True:
+                modalities.append(genomics_embedding)
+            else:
+                genomics_embedding = torch.zeros((data['patch_features'].shape[0], self.inner_proj.out_features)).to(self.device)
+                modalities.append(genomics_embedding)
+        if "CNV" in self.input_modalities:
+            if data["cnv_status"].item() is True:
+                modalities.append(cnv_embedding)
+            else:
+                cnv_embedding = torch.zeros((data['patch_features'].shape[0], self.inner_proj.out_features)).to(self.device)
+                modalities.append(cnv_embedding)
+        if 'CT' in self.input_modalities:
+            if data["ct_status"].item() is True:
+                modalities.append(ct_embedding)
+            else:
+                ct_embedding = torch.zeros((data['patch_features'].shape[0], self.inner_proj.out_features)).to(self.device)
+                modalities.append(ct_embedding)
+        if 'MRI' in self.input_modalities:
+            if data["mri_status"].item() is True:
+                modalities.append(mri_embedding)
+            else:
+                mri_embedding = torch.zeros((data['patch_features'].shape[0], self.inner_proj.out_features)).to(self.device)
+                modalities.append(mri_embedding)
+        if 'Clinical' in self.input_modalities:
+            if data["clinical_status"].item() is True:
+                modalities.append(clinical_embedding)
+            else:
+                clinical_embedding = torch.zeros((data['patch_features'].shape[0], self.inner_proj.out_features)).to(self.device)
+                modalities.append(clinical_embedding)
+            
         if self.fusion_type == "sum":
             x = sum(modalities)
         elif self.fusion_type == "concatenate":

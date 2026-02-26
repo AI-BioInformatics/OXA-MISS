@@ -652,6 +652,7 @@ class PPEG(nn.Module):
 class ProSurvOriginal(nn.Module):
     def __init__(self, 
                  omic_input_dim, 
+                 input_dim,
                  fusion='concat', 
                  n_classes=4,
                  model_size_path: str='small', 
@@ -663,9 +664,10 @@ class ProSurvOriginal(nn.Module):
         
         super(ProSurvOriginal, self).__init__()
         self.fusion = fusion
+        self.input_dim=input_dim
         self.geno_input_dim = omic_input_dim
         self.n_classes = n_classes
-        self.size_dict_path = {"small": [1024, 256, 256], "big": [1024, 512, 384]}
+        self.size_dict_path = {"small": [input_dim, 256, 256], "big": [input_dim, 512, 384]}
         self.size_dict_geno = {'small': [1024, 256], 'big': [1024, 1024, 1024, 256]}
 
         ### Define Prototype Bank
@@ -839,6 +841,7 @@ class ProSurv(nn.Module):
                  genomics_group_input_dim=[25, 35, 31],
                  input_modalities = ["WSI", "Genomics"],
                  cnv_group_name= [],
+                 input_dim=1024,
                  
                  # Parametri specifici per ProSurv (possono essere esposti o hardcoded)
                  fusion='concat',
@@ -861,6 +864,7 @@ class ProSurv(nn.Module):
         # Istanzia il modello ProSurv originale
         self.prosurv_model = ProSurvOriginal(
             omic_input_dim=total_omic_input_dim,
+            input_dim=input_dim,
             fusion=fusion,
             n_classes=n_classes,
             model_size_path=model_size_path,

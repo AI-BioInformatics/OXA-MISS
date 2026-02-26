@@ -1,8 +1,8 @@
 import torch
 import torch.nn as nn
 import numpy as np
-from einops import rearrange, einsum
-
+from einops import rearrange
+from torch import einsum
 # NUM_PATHWAYS = 1280
 
 def exists(val):
@@ -225,7 +225,10 @@ class SurvPathOriginal(nn.Module):
         h_omic_bag = torch.stack(h_omic).unsqueeze(0)
 
         wsi_embed = self.wsi_projection_net(wsi)
-
+        if h_omic_bag.dim() == 4:
+            h_omic_bag = h_omic_bag.squeeze(2)
+        if wsi_embed.dim() == 2:
+            wsi_embed = wsi_embed.unsqueeze(1)
         # Assicuriamoci che i tensori siano sullo stesso device
         if h_omic_bag.device != wsi_embed.device:
              wsi_embed = wsi_embed.to(h_omic_bag.device)
@@ -270,6 +273,8 @@ class SurvPath(nn.Module):
     def __init__(self,
                  input_dim=1024,
                  genomics_group_name=["group1", "group2"],
+                 cnv_group_name=[ "tumor_suppression", "oncogenesis","protein_kinases", "cellular_differentiation","cytokines_and_growth"],
+                 input_modalities=["WSI", "Genomics"],
                  genomics_group_input_dim=[50, 50],
                  output_dim=4,
                  wsi_projection_dim=256, # Parametro specifico di SurvPath

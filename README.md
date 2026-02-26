@@ -1,30 +1,20 @@
 
 ---
 
-# OXA-MISS: A Novel Multimodal Model for Chemotherapy Response Prediction Handling Missing Modalities
-
-OXA-MISS is a novel multimodal model for chemotherapy response prediction, designed to handle missing modalities. In the task of chemotherapy response prediction in ovarian cancer, OXA-MISS achieves a 20% absolute improvement in AUC over state-of-the-art models when trained on scarce and incomplete WSI–transcriptomics datasets.
-
-This repository contains the official code for OXA-MISS, as presented at the COMPAYL - Computational Pathology and multimodal data workshop at MICCAI 2025.
-
-**Link to Paper:** [https://openreview.net/forum?id=Hc1d53Oo28]
-
-## Abstract
-
-In clinical oncology, tumor heterogeneity, data scarcity, and missing modalities are pervasive issues that significantly hinder the effectiveness of predictive models. Although multimodal integration of Whole Slide Imaging (WSI) and molecular data has shown promise in predicting overall survival (OS), current approaches often struggle when dealing with scarce and incomplete multimodal datasets, a scenario that reflects the norm rather than the exception in real-world clinical practice, especially in tasks like chemotherapy resistance prediction, where data collection is substantially more challenging than for OS. Accurately identifying patients who will not respond to chemotherapy is a critical clinical need, enabling the timely redirection to alternative therapeutic strategies and avoiding unnecessary toxicity. Hence, this paper introduces OXA-MISS, a novel multimodal model for chemotherapy response prediction designed to handle missing modalities. In the task of chemotherapy response prediction in ovarian cancer, OXA-MISS achieves a 20% absolute improvement in AUC over state-of-the-art models when trained on scarce and incomplete WSI–transcriptomics datasets. To evaluate its generalizability, we benchmarked OXA-MISS on OS prediction across three TCGA cancer types under both complete and missing-modality conditions. In these settings, the results demonstrate thatOXA-MISS achieves performance comparable to that of state-of-the-art models. In conclusion, the proposed OXA-MISS is shown to be effective in OS prediction tasks, while substantially improving predictive accuracy in realistic clinical settings, such as the proposed prediction of chemotherapy response.
+# Unified Multi-Omic Fusion for Cancer Survival Prediction: A Missing-Robust Framework across Histopathology, Radiology, Genomics, and Clinical Data
 
 ## Installation
 
-To set up the environment required to run OXA-MISS, please follow these steps:
+To set up the environment required to run our model, please follow these steps:
 
 1.  **Create a new Conda environment:**
     ```bash
-    conda create -n oxamiss python=3.10.14
+    conda create -n multimodal python=3.10.14
     ```
 
 2.  **Activate the environment:**
     ```bash
-    conda activate oxamiss
+    conda activate multimodal
     ```
 
 3.  **Install the required packages:**
@@ -34,7 +24,7 @@ To set up the environment required to run OXA-MISS, please follow these steps:
 
 ## Demo
 
-We provide a demo code base to showcase how to execute a k-fold training (or test) of OXA-MISS on the Overall Survival (OS) prediction task using a small set of data from the TCGA-KIRC dataset.
+We provide a demo code base to showcase how to execute a k-fold training (or test) of the model on the Overall Survival (OS) prediction task using a small set of data from the TCGA-KIRC dataset.
 
 ### Demo Folder Structure
 
@@ -92,15 +82,15 @@ The output is formatted as a table, similar to the example below:
 Demo results:
 
       ID model_name dataset_name                   model_version modality_setting     test_scenario  c-index_mean  c-index_std   c-index_list
-8qxvy6t3   OXA_MISS         KIRC    Lowest_Validation_Loss_Model         complete          complete         0.327        0.244 [0.571, 0.083]
-8qxvy6t3   OXA_MISS         KIRC Highest_Validation_Metric_Model         complete          complete         0.214        0.214   [0.429, 0.0]
-8qxvy6t3   OXA_MISS         KIRC                Last_Epoch_Model         complete          complete         0.327        0.244 [0.571, 0.083]
-8qxvy6t3   OXA_MISS         KIRC    Lowest_Validation_Loss_Model         complete      wsi_miss_100         0.298        0.131 [0.429, 0.167]
-8qxvy6t3   OXA_MISS         KIRC Highest_Validation_Metric_Model         complete      wsi_miss_100         0.298        0.131 [0.429, 0.167]
-8qxvy6t3   OXA_MISS         KIRC                Last_Epoch_Model         complete      wsi_miss_100         0.298        0.131 [0.429, 0.167]
-8qxvy6t3   OXA_MISS         KIRC    Lowest_Validation_Loss_Model         complete genomics_miss_100         0.536        0.036   [0.571, 0.5]
-8qxvy6t3   OXA_MISS         KIRC Highest_Validation_Metric_Model         complete genomics_miss_100         0.536        0.036   [0.571, 0.5]
-8qxvy6t3   OXA_MISS         KIRC                Last_Epoch_Model         complete genomics_miss_100         0.536        0.036   [0.571, 0.5]
+8qxvy6t3   OUR_MODEL         KIRC    Lowest_Validation_Loss_Model         complete          complete         0.327        0.244 [0.571, 0.083]
+8qxvy6t3   OUR_MODEL         KIRC Highest_Validation_Metric_Model         complete          complete         0.214        0.214   [0.429, 0.0]
+8qxvy6t3   OUR_MODEL         KIRC                Last_Epoch_Model         complete          complete         0.327        0.244 [0.571, 0.083]
+8qxvy6t3   OUR_MODEL         KIRC    Lowest_Validation_Loss_Model         complete      wsi_miss_100         0.298        0.131 [0.429, 0.167]
+8qxvy6t3   OUR_MODEL         KIRC Highest_Validation_Metric_Model         complete      wsi_miss_100         0.298        0.131 [0.429, 0.167]
+8qxvy6t3   OUR_MODEL         KIRC                Last_Epoch_Model         complete      wsi_miss_100         0.298        0.131 [0.429, 0.167]
+8qxvy6t3   OUR_MODEL         KIRC    Lowest_Validation_Loss_Model         complete genomics_miss_100         0.536        0.036   [0.571, 0.5]
+8qxvy6t3   OUR_MODEL         KIRC Highest_Validation_Metric_Model         complete genomics_miss_100         0.536        0.036   [0.571, 0.5]
+8qxvy6t3   OUR_MODEL         KIRC                Last_Epoch_Model         complete genomics_miss_100         0.536        0.036   [0.571, 0.5]
 
 ```
 
@@ -129,21 +119,6 @@ Demo results:
 -   **c-index\_mean**, **c-index\_std**, **c-index\_list**: The mean, standard deviation, and list of the Concordance Index scores across the different folds of the cross-validation.
 
 #### Additional Outputs
--   **CSV Results**: The results table is also saved as a CSV file in the project directory at `experiments/test_results_csv/Surv_OXA_MISS.csv`.
+-   **CSV Results**: The results table is also saved as a CSV file in the project directory at `experiments/test_results_csv/Surv_OUR_MODEL.csv`.
 -   **Wandb Integration**: If you log in to your Weights & Biases account, all relevant training metrics (loss, C-index, etc.) will be automatically logged, allowing you to visualize the training evolution and compare runs. For the test demo, performance results are also logged.
 
-
-## Citation
-
-If you use OXA-MISS in your work, please cite our paper:
-
-```
-@inproceedings{
-miccolis2025oxamiss,
-title={{OXA}-{MISS}: A Robust Multimodal Architecture for Chemotherapy Response Prediction under Data Scarcity},
-author={Francesca Miccolis and Fabio Marinelli and Vittorio Pipoli and Daria Afenteva and Anni Virtanen and Marta Lovino and ELISA FICARRA},
-booktitle={MICCAI Workshop on Computational Pathology with Multimodal Data (COMPAYL)},
-year={2025},
-url={https://openreview.net/forum?id=Hc1d53Oo28}
-}
-```

@@ -2,12 +2,12 @@
 #SBATCH --partition=all_usr_prod
 #SBATCH --gres=gpu:1
 #SBATCH --mem=80G
-#SBATCH --job-name=aug_train
-#SBATCH --time=18:00:00
-#SBATCH --output=/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/slurm_out/augmented_train_%j.out
+#SBATCH --job-name=Frontiers_OXA
+#SBATCH --time=01:00:00
+#SBATCH --output=/work/H2020DeciderFicarra/fmiccolis/Frontiers/logs/%j_OXA_MISS.out
 #SBATCH --cpus-per-task=2
 #SBATCH --account=H2020DeciderFicarra
-#SBATCH--constraint="gpu_L40S_48G|gpu_A40_48G|gpu_RTX5000_16G|gpu_RTXA5000_24G|gpu_RTX6000_24G"
+#SBATCH--constraint="gpu_A40_45G|gpu_L40S_45G|gpu_RTX5000_16G|gpu_RTX6000_24G|gpu_RTX_A5000_24G"
 
 # |gpu_2080Ti_11G
 # Variabile booleana per indicare se il parametro è stato trovato
@@ -77,34 +77,31 @@ fi
 echo "✅ Parametri letti correttamente:"
 echo "Grid Search Index: $grid_search_model_version_index"
 echo "Model Name: $model_name"
-
+config_path="/work/H2020DeciderFicarra/fmiccolis/Frontiers/OXA-MISS/config/${model_name}.yaml"
 # Mappa modello -> config file
-case "$model_name" in
-  "Custom_Multimodal_XA")
-    config_path="/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/config/experiments/custom_multimodal_XA_MISSING_MODALITIES.yaml"
-    ;;
-  "MUSE")
-    config_path="/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/config/experiments/MUSE_OS_MISSING_MODALITIES.yaml"
-    ;;
-  "ProSurv")
-    config_path="/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/config/experiments/ProSurv.yaml"
-    ;;
-  "SurvPath")
-    config_path="/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/config/experiments/SurvPath.yaml"
-    ;;
-  "Custom_Multimodal_XA_v2")
-    config_path="/work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/config/experiments/custom_multimodal_XA_v2_MISSING_MODALITIES.yaml"
-    ;;
-  *)
-    echo "❌ Errore: modello sconosciuto '$model_name'"
-    exit 1
-    ;;
-esac
+# case "$model_name" in
+#   "OXA_MISS")
+#     config_path="/work/H2020DeciderFicarra/fmiccolis/Frontiers/OXA-MISS/config/OXA_MISS.yaml"
+#     ;;
+#   "CLAM")\
+#     config_path="/work/H2020DeciderFicarra/fmiccolis/Frontiers/OXA-MISS/config/CLAM.yaml"
+#     ;;
+#   "ABMIL")
+#     config_path="/work/H2020DeciderFicarra/fmiccolis/Frontiers/OXA-MISS/config/ABMIL.yaml"
+#     ;;
+#   "TransMIL")
+#     config_path="/work/H2020DeciderFicarra/fmiccolis/Frontiers/OXA-MISS/config/TransMIL.yaml"
+#     ;;
+#   *)
+#     echo "❌ Errore: modello sconosciuto '$model_name'"
+#     exit 1
+#     ;;
+# esac
 
 echo "🔗 Config YAML selezionato: $config_path"
 
 # Esegui il tuo Python
-~/.conda/envs/multimodal_decider/bin/python /work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/main.py \
+~/.conda/envs/multimodal_decider/bin/python /work/H2020DeciderFicarra/fmiccolis/Frontiers/OXA-MISS/main.py \
     --config "$config_path" \
     --grid_search_model_version_index "$grid_search_model_version_index" \
     --verbose

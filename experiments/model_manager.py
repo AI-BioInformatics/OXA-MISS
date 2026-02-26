@@ -15,10 +15,11 @@ import numpy as np
 import pandas as pd
 from lifelines import KaplanMeierFitter
 from lifelines.statistics import logrank_test
-from sklearn.metrics import roc_auc_score, confusion_matrix,f1_score
+from sklearn.metrics import roc_auc_score, confusion_matrix,f1_score, recall_score
 import matplotlib.pyplot as plt
 import seaborn as sns
 import io, copy
+#import psutil
 from PIL import Image
 from .utils import accuracy_confusionMatrix_plot, kfold_results_merge, move_to_device, import_class_from_path
 import os
@@ -62,6 +63,8 @@ class ModelManager():
         except:
             self.clip_grad_norm_max_norm = None
         wandb.watch(self.net, log_freq=100)
+        # self.process = psutil.Process(os.getpid())
+        
         
     def __getLossFunction__(self):
         if self.config.loss.name == "NLLSurvLoss":
@@ -216,17 +219,23 @@ class ModelManager():
                 else:
                     auc = np.nan
                 f1 = f1_score(all_labels, all_predictions, average='macro')
+                recall_pos= recall_score(all_labels, all_predictions, average='binary', pos_label=1)
+                recall_neg= recall_score(all_labels, all_predictions, average='binary', pos_label=0)
+                balanced_acc = (recall_pos + recall_neg) / 2
                 accuracy = np.mean(all_labels == all_predictions)     
             else:
                 auc = np.nan
                 f1 = np.nan
                 accuracy = np.nan
+                recall_neg=np.nan
+                recall_pos=np.nan
+                balanced_acc=np.nan
 
             # Calculate loss
             all_logits = all_logits.to(self.device)
             all_labels = torch.tensor(all_labels).long().to(self.device)
             loss = self.loss_function(all_logits, all_labels)
-            metrics_dict = {"AUC": auc, "Loss": loss, "Accuracy": accuracy, "F1-Score": f1}
+            metrics_dict = {"AUC": auc, "Loss": loss, "Accuracy": accuracy, "F1-Score": f1, "Recall-Pos": recall_pos, "Recall-Neg": recall_neg, "Balanced-Acc": balanced_acc}
         else:
             raise Exception(f"{task_type} is not supported!")
         return metrics_dict
@@ -450,7 +459,7 @@ class ModelManager():
                             div_loss = torch.sum(F.softmax(attention, dim=-1) * F.log_softmax(attention, dim=-1))
                             loss = self.AEM_lamda * div_loss + bag_loss
                         else:
-                            loss = self.loss_function(outputs, labels.squeeze(1))
+                           loss = self.loss_function(outputs, labels.squeeze(1))
                     else:
                         raise Exception(f"{task_type} is not supported!")
 
@@ -511,7 +520,7 @@ class ModelManager():
                 with torch.inference_mode():
                     for idx, batch in tqdm(enumerate(eval_dataloader)):
                         if debug and batch_numb == DEBUG_BATCHES:
-                            break
+                            breakTreatment_ResponseAggg
                         if idx == 0:
                             log_dict = self.initialize_metrics_dict(task_type)
                             
@@ -679,7 +688,7 @@ class ModelManager():
                                 plot_to_log[f"Test{log_fold_string}/Missing_modalities_scenarios/{scenario}/Confusion_Matrix"] = wandb.Image(test_confusion_matrix)
                             to_log.update(plot_to_log) 
                                      
-                   
+            #to_log.update({"system/ram_gb": self.process.memory_info().rss / (1024**3)})       
             wandb.log(to_log)     
       
             if self.config.scheduler.batch_step==None or self.config.scheduler.batch_step==False:
@@ -785,13 +794,29 @@ class ModelManager():
         if best:
             if kfold != "":
                 checkpoint_splitted_last = checkpoint_last_epoch.split(".")
-                checkpoint_last_epoch = f"{checkpoint_splitted_last[0]}{df_fold_suffix}.pt"
+                root, ext = os.path.splitext(checkpoint_last_epoch)
+                if not root.endswith(df_fold_suffix):
+                    checkpoint_last_epoch = f"{root}{df_fold_suffix}{ext}"
+                else:
+                    checkpoint_last_epoch = f"{root}{ext}"
 
                 checkpoint_splitted_lowest_l = checkpoint_model_lowest_loss.split(".")
-                checkpoint_model_lowest_loss = f"{checkpoint_splitted_lowest_l[0]}{df_fold_suffix}.pt"
+                root, ext = os.path.splitext(checkpoint_model_lowest_loss)
+                if not root.endswith(df_fold_suffix):
+                    checkpoint_model_lowest_loss = f"{root}{df_fold_suffix}{ext}"
+                else:
+                    checkpoint_model_lowest_loss = f"{root}{ext}"
+                
+                
+                checkpoint_model_lowest_loss = f"{root}{df_fold_suffix}{ext}"
 
                 checkpoint_splitted_highest_m = checkpoint_model_highest_metric.split(".")
-                checkpoint_model_highest_metric = f"{checkpoint_splitted_highest_m[0]}{df_fold_suffix}.pt"
+                
+                root, ext = os.path.splitext(checkpoint_model_highest_metric)
+                if not root.endswith(df_fold_suffix):
+                    checkpoint_model_highest_metric = f"{root}{df_fold_suffix}{ext}"
+                else:
+                    checkpoint_model_highest_metric = f"{root}{ext}"
             if os.path.exists(checkpoint_model_lowest_loss):
                 model_lowest_l = torch.load(checkpoint_model_lowest_loss, weights_only=False)
             else:
@@ -841,8 +866,8 @@ class ModelManager():
                     labels = step_result['labels'] 
                     censorships = step_result['censorships'] 
                     log_dict = step_result['log_dict']
-
-
+                    pd.DataFrame(log_dict).to_csv(f"{path}/test_df_{df_fold_suffix}_{summary_path.split('/')[0]}.csv", index=False)
+                    print(f'Results saved in csv file: {path}/test_df_{df_fold_suffix}_{summary_path.split("/")[0]}.csv')
                     if task_type == "Survival":
                         loss = self.loss_function(outputs, labels, None, censorships)
                     elif task_type == "Treatment_Response":
@@ -859,6 +884,8 @@ class ModelManager():
             tloss = np.array(tloss)
             tloss = np.average(tloss, weights=tlossWeights)
             test_df = pd.DataFrame(log_dict)
+            # test_df.to_csv(f"{path}/test_df_{df_fold_suffix}.csv", index=False)
+            
             test_metrics_dict = self.compute_metrics_df(test_df, task_type)
 
             self.results_store.add_result(
@@ -908,6 +935,7 @@ class ModelManager():
                     current_f1_std = metrics['F1-Score_std']
                     current_auc_std = metrics['AUC_std']
                     current_acc_std = metrics['Accuracy_std']
+                    
 
                     if current_f1_mean > max_f1: overperformed_metrics.append('F1-Score')
                     if current_auc_mean > max_auc: overperformed_metrics.append('AUC')
@@ -1000,7 +1028,7 @@ class ModelManager():
                 #             new_row[key] = value
 
                 if task_type == "Treatment_Response":
-                    task_metrics = ["AUC", "F1-Score", "Accuracy"]
+                    task_metrics = ["AUC", "F1-Score", "Accuracy"] 
                 else:
                     task_metrics = ["c-index"]
                                 
