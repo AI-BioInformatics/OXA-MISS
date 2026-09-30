@@ -232,6 +232,8 @@ config/datasets/Slide_Decider_dataset_TR_chemorefractory_all_tissues.yaml
 config/datasets/Slide_Decider_dataset_TR_chemorefractory.yaml
 config/datasets/Slide_TR_PTRC-HGSOC_all_tissues.yaml
 config/datasets/Slide_TR_PTRC-HGSOC.yaml
+.claudeignore
+dataset_old
 
 
 *.sh

@@ -339,8 +339,8 @@ class MUSE(nn.Module):
 
         self.dropout_layer = nn.Dropout(dropout)
 
-        self.x1_encoder = ABMIL(input_dim=input_dim,output_dim=embedding_size)
-        # self.x1_mapper = nn.Linear(embedding_size, embedding_size)
+        # self.x1_encoder = ABMIL(input_dim=input_dim,output_dim=embedding_size)
+        self.x1_mapper = nn.Linear(embedding_size, embedding_size)
 
         # self.x2_encoder = FFNEncoder(input_dim=227,
         #                              hidden_dim=embedding_size,
@@ -380,6 +380,7 @@ class MUSE(nn.Module):
             label,
             # **kwargs,
     ):
+        
         x1 = data['patch_features']
         x1_flag = data["WSI_status"]
 

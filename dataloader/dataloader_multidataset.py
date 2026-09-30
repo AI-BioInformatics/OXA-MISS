@@ -116,22 +116,31 @@ class Multimodal_Bio_Dataset(Dataset):
                 else:
                     raise ValueError("Missing modalities table path not found in dataset config file")
             
+            # CT/MRI/clinical sources are stored per dataset: each dataset config has its own feature folders,
+            # so a single attribute would be overwritten by the last config in datasets_configs.
+            if not hasattr(self, 'ct_paths'):
+                self.ct_paths, self.mri_paths, self.clinical_data_per_dataset = {}, {}, {}
             if hasattr(config.parameters,'ct_path'):
-                self.ct_path=config.parameters.ct_path
+                self.ct_paths[config.name]=config.parameters.ct_path
                 self.ct_chosen=pd.read_csv('/work/H2020DeciderFicarra/ccRCC/CT_mapping.csv')
-                
+
             if hasattr(config.parameters,'mri_path'):
-                self.mri_path=config.parameters.mri_path
+                self.mri_paths[config.name]=config.parameters.mri_path
                 self.mri_chosen=pd.read_csv('/work/H2020DeciderFicarra/ccRCC/MRI_mapping.csv')
             if hasattr(config.parameters,'clinical_path'):
-                self.clinical_path=config.parameters.clinical_path
-                self.clinical_data=pd.read_csv(self.clinical_path)
-                CLINGEN_COLS = ['case_id','gender','age_diag','grade','cancer_history', 
+                clinical_data=pd.read_csv(config.parameters.clinical_path)
+                CLINGEN_COLS = ['case_id','gender','age_diag','grade','cancer_history',
                     'ajcc_path_tumor_pt','ajcc_path_nodes_pn','ajcc_clin_metastasis_cm',
                     'ajcc_path_metastasis_pm','ajcc_path_tumor_stage','race_Asian','race_Black or African American',
                     'race_Hispanic or Latino','race_White','race_other']
-                self.clinical_data = self.clinical_data[CLINGEN_COLS]
-                self.clinical_data = self.clinical_data.set_index('case_id')
+                clinical_data = clinical_data[CLINGEN_COLS]
+                clinical_data = clinical_data.set_index('case_id')
+                self.clinical_data_per_dataset[config.name] = clinical_data
+                # union over all datasets, used only to check which patients have clinical data
+                if hasattr(self, 'clinical_data'):
+                    clinical_data = pd.concat([self.clinical_data, clinical_data])
+                    clinical_data = clinical_data[~clinical_data.index.duplicated(keep='first')]
+                self.clinical_data = clinical_data
             if hasattr(config.parameters, 'genomics_path'):
                 genomics_path = config.parameters.genomics_path
                 if genomics_path.endswith(".tsv"):
@@ -621,30 +630,55 @@ class Multimodal_Bio_Dataset(Dataset):
                     cnv_status = True
             else:
                 cnv_status = False
-        if hasattr(self, 'ct_path'):
-            if self.ct_chosen[self.ct_chosen['case_id']==index].empty or not 'CT' in self.input_modalities:
-                ct_feats = torch.zeros((1,512), dtype=torch.float32)  
+        dataset_name = row["dataset_name"]
+        if len(self.ct_paths) > 0:
+            # fall back to another dataset's path only to size the zero placeholder
+            ct_path = self.ct_paths.get(dataset_name)
+            if ct_path is None or self.ct_chosen[self.ct_chosen['case_id']==index].empty or not 'CT' in self.input_modalities:
+                if 'mednet' in (ct_path or next(iter(self.ct_paths.values()))):
+                    ct_feats = torch.zeros((1,2048), dtype=torch.float32) #TODO: usare parametro input encoder   MEDNET: 2048
+                else:
+                    ct_feats = torch.zeros((1,768), dtype=torch.float32) #TODO: usare parametro input encoder  
                 ct_status = False
             else:
-                ct_sample = os.path.join(self.ct_path, self.ct_chosen[self.ct_chosen['case_id']==index]['chosen_exam'].values[0])
-                ct_feats=np.squeeze(np.load(ct_sample)['arr_0'],axis=(1,3))
-                ct_feats=torch.from_numpy(ct_feats)
-                ct_status = True
-        if hasattr(self, 'mri_path'):
-            if self.mri_chosen[self.mri_chosen['case_id']==index].empty or not 'MRI' in self.input_modalities:
-                mri_feats = torch.zeros((1,512), dtype=torch.float32)  
+                ct_sample = os.path.join(ct_path, self.ct_chosen[self.ct_chosen['case_id']==index]['chosen_exam'].values[0])
+                if ct_sample is None or not os.path.exists(ct_sample):
+                    ct_status = False
+                else:
+                #     ct_sample=os.path.join('/work/H2020DeciderFicarra/ccRCC/features_meanpooled/suprem/CT/CCRCC', self.ct_chosen[self.ct_chosen['case_id']==index]['chosen_exam'].values[0])
+                # if not os.path.exists(ct_sample):
+                #    ct_sample=os.path.join('/work/H2020DeciderFicarra/ccRCC/features_meanpooled/suprem/CT/KIRC', self.ct_chosen[self.ct_chosen['case_id']==index]['chosen_exam'].values[0])
+                    ct_feats=np.squeeze(np.load(ct_sample)['arr_0'],axis=(1,3))
+                    ct_feats=torch.from_numpy(ct_feats)
+                    ct_status = True
+        if len(self.mri_paths) > 0:
+            mri_path = self.mri_paths.get(dataset_name)
+            if mri_path is None or self.mri_chosen[self.mri_chosen['case_id']==index].empty or not 'MRI' in self.input_modalities:
+                if 'mednet' in (mri_path or next(iter(self.mri_paths.values()))):
+                    mri_feats = torch.zeros((1,2048), dtype=torch.float32)  #TODO: usare parametro input encoder
+                else:
+                # mri_feats = torch.zeros((1,2048), dtype=torch.float32)  #TODO: usare parametro input encoder
+                    mri_feats = torch.zeros((1,320), dtype=torch.float32)  #TODO: usare parametro input encoder
                 mri_status = False
             else:
-                mri_sample = os.path.join(self.mri_path, self.mri_chosen[self.mri_chosen['case_id']==index]['chosen_exam'].values[0])
-                mri_feats=np.squeeze(np.load(mri_sample)['arr_0'],axis=(1,3))  
-                mri_feats=torch.from_numpy(mri_feats) 
-                mri_status = True
-        if hasattr(self, 'clinical_path'):
-            if index not in self.clinical_data.index or not 'Clinical' in self.input_modalities:
-                clinical_feats = torch.zeros((1,self.clinical_data.shape[1]), dtype=torch.float32)  
+                mri_sample = os.path.join(mri_path, self.mri_chosen[self.mri_chosen['case_id']==index]['chosen_exam'].values[0])
+                
+                if mri_sample is None or not os.path.exists(mri_sample):
+                    mri_status = False
+                else:
+                #     mri_sample=os.path.join('/work/H2020DeciderFicarra/ccRCC/features_meanpooled/mrseg/MR/CCRCC', self.mri_chosen[self.mri_chosen['case_id']==index]['chosen_exam'].values[0])
+                # if not os.path.exists(mri_sample):
+                #    mri_sample=os.path.join(self.mri_path, self.mri_chosen[self.mri_chosen['case_id']==index]['chosen_exam'].values[0])
+                    mri_feats=np.squeeze(np.load(mri_sample)['arr_0'],axis=(1,3))  
+                    mri_feats=torch.from_numpy(mri_feats) 
+                    mri_status = True
+        if len(self.clinical_data_per_dataset) > 0:
+            clinical_data = self.clinical_data_per_dataset.get(dataset_name)
+            if clinical_data is None or index not in clinical_data.index or not 'Clinical' in self.input_modalities:
+                clinical_feats = torch.zeros((1,self.clinical_data.shape[1]), dtype=torch.float32)
                 clinical_status = False
             else:
-                clinical_feats = self.clinical_data.loc[index].values.astype(np.float32)
+                clinical_feats = clinical_data.loc[index].values.astype(np.float32)
                 clinical_feats = torch.tensor(clinical_feats)
                 clinical_status = True
         if self.robust_training:
@@ -658,7 +692,6 @@ class Multimodal_Bio_Dataset(Dataset):
                         # remove genomics
                         genomics_status = False
 
-        dataset_name = row["dataset_name"]
         # if self.patient_df.loc[index].case_id== 'TCGA-BP-4341':
         #     print("DEBUG: Trovato paziente TCGA-BP-4341! Controlla")
         tissue_type_filter = self.datasets[dataset_name].tissue_type_filter

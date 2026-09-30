@@ -33,7 +33,7 @@ The `demo_training/` directory contains all the configuration files and data nee
 *   `config_demo.yaml`: The main configuration file. It defines all parameters for the experiment, including:
     *   **Data paths:** Specifies where to find the dataset configuration files.
     *   **DataLoader settings:** Controls how data is loaded, including missing modality handling (`missing_mod_rate`), batch size, and the number of bins for survival analysis.
-    *   **Model configuration:** Defines the OXA-MISS architecture, such as input modalities (`WSI`, `Genomics`), layer dimensions, and dropout rates.
+    *   **Model configuration:** Defines the architecture, such as input modalities (`WSI`, `Genomics`), layer dimensions, and dropout rates.
     *   **Training settings:** Sets the loss function (`NLLSurvLoss`), optimizer (`RAdam`), learning rate scheduler, and the number of epochs.
 *   `TCGA_KIRC_dataset_demo_training.yaml`: A dataset-specific configuration file for TCGA-KIRC. It specifies the paths for:
     *   The labels file (`TCGA_KIRC_labels.csv`).
@@ -47,7 +47,7 @@ The `demo_training/` directory contains all the configuration files and data nee
 
 ### Running the Training Demo
 
-To start the training process for the OXA-MISS model using the demo configuration, run the following command from the project's root directory:
+To start the training process of the model using the demo configuration, run the following command from the project's root directory:
 
 ```bash
 python main.py --config demo_training/config_demo.yaml --verbose --debug --demo_training

@@ -15,9 +15,10 @@ import numpy as np
 import pandas as pd
 from lifelines import KaplanMeierFitter
 from lifelines.statistics import logrank_test
-from sklearn.metrics import roc_auc_score, confusion_matrix,f1_score, recall_score
+from sklearn.metrics import roc_auc_score, confusion_matrix,f1_score, recall_score, balanced_accuracy_score
 import matplotlib.pyplot as plt
 import seaborn as sns
+import yaml
 import io, copy
 #import psutil
 from PIL import Image
@@ -40,8 +41,25 @@ class ModelManager():
         self.real_batch_size = config.data_loader.real_batch_size
         self.NUM_ACCUMULATION_STEPS = self.real_batch_size//config.data_loader.batch_size
         self.attention_dir_check = False
-        
+        self.datasets_list = config.data_loader.datasets_configs
         model_kwargs = config.model.kwargs
+        yaml_path = self.datasets_list[0]
+        with open(yaml_path, 'r') as file:
+            yaml_data = yaml.safe_load(file)
+        if 'CT' in model_kwargs.get('input_modalities', []):
+            ct_path = yaml_data.get('parameters', {}).get('ct_path', '')
+            if 'mednet' in ct_path:
+                ct_emb_dim = 2048
+            else:
+                ct_emb_dim = 768
+        if 'MRI' in model_kwargs.get('input_modalities', []):
+            mri_path = yaml_data.get('parameters', {}).get('mri_path', '')
+            if 'mednet' in mri_path:
+                mri_emb_dim = 2048
+            else:
+                mri_emb_dim = 320
+        model_kwargs['ct_emb_dim'] = ct_emb_dim if 'CT' in model_kwargs.get('input_modalities', []) else None   
+        model_kwargs['mri_emb_dim'] = mri_emb_dim if 'MRI' in model_kwargs.get('input_modalities', []) else None
         self.net = ModelClass(**model_kwargs) 
         self.net.to(self.device)
 
@@ -221,7 +239,7 @@ class ModelManager():
                 f1 = f1_score(all_labels, all_predictions, average='macro')
                 recall_pos= recall_score(all_labels, all_predictions, average='binary', pos_label=1)
                 recall_neg= recall_score(all_labels, all_predictions, average='binary', pos_label=0)
-                balanced_acc = (recall_pos + recall_neg) / 2
+                balanced_acc = balanced_accuracy_score(all_labels, all_predictions, adjusted=True)
                 accuracy = np.mean(all_labels == all_predictions)     
             else:
                 auc = np.nan

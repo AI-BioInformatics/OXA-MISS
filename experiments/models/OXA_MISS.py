@@ -1,6 +1,7 @@
 import torch 
 import torch.nn as nn
 import torch.nn.functional as F
+import yaml
 import torch.nn.init as init
 torch.autograd.set_detect_anomaly(True)
 
@@ -84,7 +85,8 @@ class OXA_MISS(nn.Module):
                     dropout=0.5,
                     input_modalities = ["WSI", "Genomics"],
                     fusion_type="concatenate",  # sum | concatenate
-                    
+                    ct_emb_dim=2048,
+                    mri_emb_dim=2048,
                     use_WSI_level_embs= False,
                     WSI_level_embs_fusion_type= "concat", # sum | concat
                     WSI_level_encoder_dropout= 0.2,
@@ -139,12 +141,14 @@ class OXA_MISS(nn.Module):
         self.cnv_FF = FeedForwardLayer(inner_dim, inner_dim, inner_dim)
 
         if 'CT' in self.input_modalities:
+
             self.ct_encoder = nn.Sequential(
-                                    nn.Linear(512, inner_dim),
+                                    nn.Linear(ct_emb_dim, inner_dim), 
                                 )
         if 'MRI' in self.input_modalities:
+        
             self.mri_encoder = nn.Sequential(
-                                    nn.Linear(512, inner_dim),
+                                    nn.Linear(mri_emb_dim, inner_dim),  
                                 )
         if 'Clinical' in self.input_modalities:
             self.clinical_encoder = nn.Sequential(
@@ -366,7 +370,7 @@ class OXA_MISS(nn.Module):
                 modalities.append(clinical_embedding)
             
         if self.fusion_type == "sum":
-            x = sum(modalities)
+            x = torch.stack(modalities, dim=0).mean(dim=0)
         elif self.fusion_type == "concatenate":
             x = torch.cat(modalities, dim=1)
         else:

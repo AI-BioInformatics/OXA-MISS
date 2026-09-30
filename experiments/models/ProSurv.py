@@ -797,6 +797,7 @@ class ProSurvOriginal(nn.Module):
         h_geno_avg = (h_geno + h_geno_read) /2
 
         if self.training:
+            
             path_loss_align = 0.
             geno_loss_align = 0.
             
