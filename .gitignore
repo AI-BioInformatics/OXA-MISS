@@ -238,4 +238,5 @@ dataset_old
 
 *.sh
 grid_search/run_grid_search.sh
-dataloader/dataset_updated*
+dataloader/dataset_updated_*
+dataloader/dataset_updated/audit
