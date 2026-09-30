@@ -4,13 +4,14 @@ import os
 import numpy as np
 from copy import deepcopy
 from sklearn.preprocessing import StandardScaler
-from torch.utils.data import Dataset, DataLoader, Subset, SequentialSampler, SubsetRandomSampler
-from .dataloader_utils import extract_names
+from torch.utils.data import Dataset, DataLoader, Subset
+from .dataloader_utils import extract_names, report_patients_not_in_dataset
 import yaml
-from munch import munchify, unmunchify, Munch
+from munch import munchify
 import json
 import glob
 import bisect
+import csv
 
 DEFAULT_CT_MAPPING = '/work/H2020DeciderFicarra/ccRCC/CT_mapping.csv'
 DEFAULT_MRI_MAPPING = '/work/H2020DeciderFicarra/ccRCC/MRI_mapping.csv'
@@ -52,9 +53,27 @@ class Multimodal_Bio_Dataset(Dataset):
         self.task_type = task_type
         self.load_slides_in_RAM = load_slides_in_RAM
         self.robust_training = False
+        # missing WSI: (1, dim) placeholder instead of (max_patches, dim) zeros; safe only if every batch has
+        # one patient (tensors of different shapes cannot be collated) -> enabled by get_dataloaders
+        self.compact_missing_wsi = False
         if self.load_slides_in_RAM:
             self.slides_cache = {}
             
+        # gene groups loaded once for all the datasets: each dataset's genomics then keeps only its genes
+        # (intersection over the datasets). Reloading them per dataset kept only the last dataset's genes,
+        # so genes missing there would be NaN for the patients of the other datasets.
+        with open(file_genes_group, 'r') as f:
+            self.genes_groups = json.load(f)
+            if self.model_name == 'ProSurv':
+                seen_genes = set()
+                for group in self.genes_groups.values():
+                    unique_genes = []
+                    for gene in group['ensg_gene_id']:
+                        if gene not in seen_genes:
+                            unique_genes.append(gene)
+                            seen_genes.add(gene)
+                    group['ensg_gene_id'] = unique_genes
+
         self.datasets = {}
         for i, dataset_config in enumerate(datasets_configs):
             config = yaml.load(open(dataset_config, "r"), yaml.FullLoader)
@@ -98,6 +117,10 @@ class Multimodal_Bio_Dataset(Dataset):
                     rename_dict[params.censorships_name] = "censorship"
                 dataframe.rename(columns=rename_dict, inplace=True)
                 dataframe["time"] = dataframe["time"].astype(int)
+                non_positive = dataframe.loc[dataframe["time"] <= 0, "case_id"].unique()
+                if len(non_positive):  # not a valid survival time
+                    print(f"[❗] Dataset {config.name}: {len(non_positive)} patients with follow-up <= 0 days skipped, e.g. {list(non_positive[:5])}")
+                    dataframe = dataframe[dataframe["time"] > 0]
                 self._check_censorship_convention(config.name, dataframe)
                 self.case_id_name = "case_id"
                 self.slide_id_name = "slide_id"
@@ -106,18 +129,6 @@ class Multimodal_Bio_Dataset(Dataset):
                 self.slide_id_name = self.datasets[config.name].slide_id_name
             dataframe = self.filter_by_tissue_type(config.name, dataframe, config.parameters.tissue_type_filter)                
             
-            with open(file_genes_group, 'r') as f:
-                self.genes_groups = json.load(f)
-                if self.model_name == 'ProSurv':
-                    seen_genes = set()
-                    for group in self.genes_groups.values():
-                        unique_genes = []
-                        for gene in group['ensg_gene_id']:
-                            if gene not in seen_genes:
-                                unique_genes.append(gene)
-                                seen_genes.add(gene)
-                        group['ensg_gene_id'] = unique_genes
-
             if use_missing_modalities_tables:
                 if hasattr(config.parameters, 'missing_modalities_table_path'):
                     missing_modalities_table = pd.read_csv(config.parameters.missing_modalities_table_path)
@@ -173,14 +184,26 @@ class Multimodal_Bio_Dataset(Dataset):
                     clinical_data = pd.concat([self.clinical_data, clinical_data])
                     clinical_data = clinical_data[~clinical_data.index.duplicated(keep='first')]
                 self.clinical_data = clinical_data
-            if hasattr(config.parameters, 'genomics_path'):
+            # genomics is read only if used (SurvPath needs it to select the patients)
+            load_genomics = hasattr(config.parameters, 'genomics_path') and \
+                ('Genomics' in self.input_modalities or self.model_name == 'SurvPath')
+            if load_genomics:
                 genomics_path = config.parameters.genomics_path
                 if genomics_path.endswith(".tsv"):
-                    genomics = pd.read_csv(genomics_path, sep="\t")
+                    sep = "\t"
                 elif genomics_path.endswith(".csv"):
-                    genomics = pd.read_csv(genomics_path)
+                    sep = ","
                 else:
                     raise ValueError("Genomics file must be in .tsv or .csv format")
+                # read only the patient id and the genes of the selected groups (the matrix has ~20k genes)
+                with open(genomics_path, newline='') as fh:  # pd.read_csv(nrows=0) takes seconds on 20k columns
+                    header = next(csv.reader(fh, delimiter=sep))
+                wanted_genes = set(g for key in self.genomics_group_name for g in self.genes_groups[key]["ensg_gene_id"])
+                id_cols = [c for c in header if c in ('patient', 'Unnamed: 0')]
+                gene_cols = [c for c in header if c not in id_cols and c.split('.')[0] in wanted_genes]
+                # explicit dtypes: pandas usecols by name is slower than a full read without them
+                genomics = pd.read_csv(genomics_path, sep=sep, usecols=id_cols + gene_cols,
+                                       dtype={**{c: str for c in id_cols}, **{c: 'float64' for c in gene_cols}})
                 patient_id_found = False
                 for pid in ['patient', 'Unnamed: 0']:
                     if pid in genomics:
@@ -219,20 +242,17 @@ class Multimodal_Bio_Dataset(Dataset):
             
             if i==0:
                 self.dataframe = dataframe
-                if hasattr(config.parameters, 'genomics_path'):
+                if load_genomics:
                     self.genomics = genomics
                 if hasattr(config.parameters, 'cnv_path'):
                     self.cnv = cnv
             else:
                 self.dataframe = pd.concat([self.dataframe, dataframe], ignore_index=True)
-                if hasattr(config.parameters, 'genomics_path'):
-                    self.genomics = pd.concat([self.genomics, genomics], ignore_index=False)
+                if load_genomics:
+                    self.genomics = pd.concat([self.genomics, genomics], ignore_index=False) if hasattr(self, 'genomics') else genomics
                 if hasattr(config.parameters, 'cnv_path'):
                     self.cnv = pd.concat([self.cnv, cnv], ignore_index=True)
                        
-        #{'pAdnL', 'pOvaR', 'pMes1', 'pOth', 'pTubL', 'pPer', 'pAdnR', 'pTubL1', 'pOva', 'pTubR', 'p2Ome2', 'pPer2', 'pVag', 'pLNR', 'pUte1', 
-        # 'pPerR1', 'pOvaL1', 'pOvaL', 'p2Oth', 'pPer ', 'pTub', 'pOme2', 'p0Ome', 'pUte2', 'pOva2', 'pMes', 'pOme ', 'pBow', 'pOme1', 'pOth2', 
-        # 'pAdnR1', 'pOth1', 'p2Ome1', 'pOme', 'p2Per1', 'pPer3', 'pOvaR1', 'pPerL ', 'pUte', 'pOme3', 'pAndL', 'pTub2', 'pPer1'}
         
         self.max_patches = max_patches
         self.sample = sample
@@ -253,7 +273,6 @@ class Multimodal_Bio_Dataset(Dataset):
             suffixes=('_x', '_y')
 )
 
-            cols_to_drop = []
             for col in merged.columns:
                 if col.endswith('_x'):
                     base_col = col[:-2]
@@ -303,8 +322,11 @@ class Multimodal_Bio_Dataset(Dataset):
             self.patient_df["label"] = self.patient_df["Treatment_Response"]
         
         n_slides = sum(len(self.slides_on_disk[p]) for p in self.patient_df.index)
-        print("Dataset loaded with {} patients ({} with WSI, {} slides on disk)".format(
-            len(self.patient_df), int(self.patient_df["has_WSI"].sum()), n_slides))
+        if self.load_slides_in_RAM and 'WSI' in self.input_modalities:
+            self._preload_slides()
+        wsi_info = " ({} with WSI, {} slides on disk)".format(int(self.patient_df["has_WSI"].sum()), n_slides) \
+            if 'WSI' in self.input_modalities else ""
+        print("Dataset loaded with {} patients{}".format(len(self.patient_df), wsi_info))
 
 
     @staticmethod
@@ -442,34 +464,12 @@ class Multimodal_Bio_Dataset(Dataset):
         self.patient_df = self.patient_df[keep]
 
     def _compute_patient_df(self):
-        # if len(list(self.dataframe[self.case_id_name].unique())) > len(list(self.missing_modalities_table[self.case_id_name].unique())):
         in_datasets = self.dataframe.groupby(self.case_id_name)["dataset_name"].nunique()
         if (in_datasets > 1).any():
             raise ValueError(f"Patients in more than one dataset: {list(in_datasets.index[in_datasets > 1][:10])}")
         self.patient_df = self.dataframe.drop_duplicates(subset=self.case_id_name)
         self.patient_df = self.patient_df.reset_index(drop=True)
         self.patient_df = self.patient_df.set_index(self.case_id_name, drop=False)
-    # elif len(list(self.dataframe[self.case_id_name].unique())) <= len(list(self.missing_modalities_table[self.case_id_name].unique())):
-        #     unique_missing = self.missing_modalities_table.drop_duplicates(subset=self.case_id_name)
-    
-        #     # 2. Creiamo una versione "leggera" del dataframe principale con le info che ci servono
-        #     # Usiamo case_id (già rinominato) e dataset_name
-        #     main_info = self.dataframe[[self.case_id_name, 'dataset_name']].drop_duplicates(subset=self.case_id_name)
-            
-        #     # 3. Facciamo il merge. Questo aggiungerà 'dataset_name' alla tabella delle modalità
-        #     # Usiamo il rename preventivo per FUT/Survival se servono dopo
-        #     rename_dict = {'FUT': 'time', 'Survival': 'censorship'}
-        #     unique_missing = unique_missing.rename(columns=rename_dict)
-    
-        #     self.patient_df = pd.merge(
-        #         unique_missing,
-        #         main_info,
-        #         on=self.case_id_name,
-        #         how='left' # Mantiene tutti i pazienti di unique_missing e aggiunge dataset_name dove lo trova
-        #     )
-        #     # self.patient_df = self.missing_modalities_table.drop_duplicates(subset=self.case_id_name)
-        #     self.patient_df = self.patient_df.reset_index(drop=True)    
-        #     self.patient_df = self.patient_df.set_index(self.case_id_name, drop=False)
 
     def get_train_test_val_splits(self, train_size=0.7, val_size=0.15, test_size=0.15, random_state=42):
         np.random.seed(random_state)
@@ -486,84 +486,41 @@ class Multimodal_Bio_Dataset(Dataset):
         assert len(train_patients) + len(val_patients) + len(test_patients) == len(self.patient_list)
         return train_patients, val_patients, test_patients
     
+    def _standardize(self, data, train_patients, val_patients=None, test_patients=None):
+        """Copy of data (patients x genes) z-scored with a StandardScaler fitted on the training patients,
+        applied to the training, validation and test patients (the others keep the raw values)."""
+        available = self.patient_df.join(data, how="inner").index
+        def kept(partition, patients):
+            if patients is None:
+                return None
+            patients_kept = patients[np.isin(patients, available)]
+            report_patients_not_in_dataset(f"{partition} (normalization)", patients, patients_kept)
+            return pd.Index(patients_kept)
+        train_idx, val_idx, test_idx = kept("train", train_patients), kept("val", val_patients), kept("test", test_patients)
+        normalized = deepcopy(data)
+        scaler = StandardScaler().fit(normalized.loc[train_idx, :])
+        for idx in (train_idx, val_idx, test_idx):
+            if idx is not None and len(idx) > 0:
+                normalized.loc[idx, :] = scaler.transform(normalized.loc[idx, :])
+        return normalized
+
     def normalize_genomics(self, train_patients, val_patients=None, test_patients=None):
-        mask = np.isin(train_patients, self.patient_df.join(self.genomics, how="inner").index)
-        filtered_train_patients = train_patients[mask]
-        if len(filtered_train_patients) != len(train_patients):
-            print("Some train patients are not in the dataset: ", set(train_patients) - set(filtered_train_patients))
-        if val_patients is not None:
-            mask = np.isin(val_patients, self.patient_df.join(self.genomics, how="inner").index)
-            filtered_val_patients = val_patients[mask]
-            if len(filtered_val_patients) != len(val_patients):
-                print("Some val patients are not in the dataset: ", set(val_patients) - set(filtered_val_patients))
-        if test_patients is not None:
-            mask = np.isin(test_patients, self.patient_df.join(self.genomics, how="inner").index)
-            filtered_test_patients = test_patients[mask]
-            if len(filtered_test_patients) != len(test_patients):
-                print("Some test patients are not in the dataset: ", set(test_patients) - set(filtered_test_patients))
-
-        train_patients_idx = pd.Index(filtered_train_patients)
-        if val_patients is not None:
-            val_patients_idx = pd.Index(filtered_val_patients)
-        if test_patients is not None:
-            test_patients_idx = pd.Index(filtered_test_patients)
-
-        self.normalized_genomics = deepcopy(self.genomics)
-        X_train = self.normalized_genomics.loc[train_patients_idx, :]
-        if val_patients is not None:
-            X_val = self.normalized_genomics.loc[val_patients_idx, :]
-        if test_patients is not None:
-            X_test = self.normalized_genomics.loc[test_patients_idx, :]
-
-        scaler = StandardScaler()
-        scaler.fit(X_train)  # fit on train set
-
-        # Transform entire subsets of the copied DataFrame
-        self.normalized_genomics.loc[train_patients_idx, :] = scaler.transform(X_train)
-        if val_patients is not None and len(val_patients) > 0:
-            self.normalized_genomics.loc[val_patients_idx, :] = scaler.transform(X_val)
-        if test_patients is not None:
-            self.normalized_genomics.loc[test_patients_idx, :] = scaler.transform(X_test)
+        self.normalized_genomics = self._standardize(self.genomics, train_patients, val_patients, test_patients)
+        self.genomics_arrays = self._build_group_arrays(self.normalized_genomics, self.genomics_group_name)
 
     def normalize_cnv(self, train_patients, val_patients=None, test_patients=None):
-        mask = np.isin(train_patients, self.patient_df.join(self.cnv, how="inner").index)
-        filtered_train_patients = train_patients[mask]
-        if len(filtered_train_patients) != len(train_patients):
-            print("Some train patients are not in the dataset: ", set(train_patients) - set(filtered_train_patients))
-        if val_patients is not None and len(val_patients) > 0:
-            mask = np.isin(val_patients, self.patient_df.join(self.cnv, how="inner").index)
-            filtered_val_patients = val_patients[mask]
-            if len(filtered_val_patients) != len(val_patients):
-                print("Some val patients are not in the dataset: ", set(val_patients) - set(filtered_val_patients))
-        if test_patients is not None:
-            mask = np.isin(test_patients, self.patient_df.join(self.cnv, how="inner").index)
-            filtered_test_patients = test_patients[mask]
-            if len(filtered_test_patients) != len(test_patients):
-                print("Some test patients are not in the dataset: ", set(test_patients) - set(filtered_test_patients))
+        self.normalized_cnv = self._standardize(self.cnv, train_patients, val_patients, test_patients)
+        self.cnv_arrays = self._build_group_arrays(self.normalized_cnv, self.cnv_group_name)
 
-        train_patients_idx = pd.Index(filtered_train_patients)
-        if val_patients is not None:
-            val_patients_idx = pd.Index(filtered_val_patients)
-        if test_patients is not None:
-            test_patients_idx = pd.Index(filtered_test_patients)
-
-        self.normalized_cnv = deepcopy(self.cnv)
-        X_train = self.normalized_cnv.loc[train_patients_idx, :]
-        if val_patients is not None:
-            X_val = self.normalized_cnv.loc[val_patients_idx, :]
-        if test_patients is not None:
-            X_test = self.normalized_cnv.loc[test_patients_idx, :]
-
-        scaler = StandardScaler()
-        scaler.fit(X_train)
-
-        self.normalized_cnv.loc[train_patients_idx, :] = scaler.transform(X_train)
-        if val_patients is not None:
-            self.normalized_cnv.loc[val_patients_idx, :] = scaler.transform(X_val)
-        if test_patients is not None:
-            self.normalized_cnv.loc[test_patients_idx, :] = scaler.transform(X_test)
-
-
+    def _build_group_arrays(self, df, group_names):
+        """Per gene group, a float32 matrix (patients x genes) and patient -> row, built once after the
+        normalization so that __getitem__ only indexes a row (same selection as df[genes].loc[patient])."""
+        rows = {pid: i for i, pid in enumerate(df.index)}
+        arrays = {}
+        for key in group_names:
+            available_genes = [gene for gene in self.genes_groups[key]["ensg_gene_id"] if gene in df.columns]
+            arrays[key] = df[available_genes].to_numpy(dtype=np.float32)
+        return {'rows': rows, 'arrays': arrays}
 
     def _compute_labels(self):
         uncensored_df = self.patient_df[(self.patient_df["censorship"] == 0)]# & (self.patient_df['complete'] == True)]
@@ -584,6 +541,26 @@ class Multimodal_Bio_Dataset(Dataset):
             return binned_filled.astype(int)
         self.patient_df.insert(2, 'label', safe_binning(self.patient_df["time"], q_bins))
         self.bins = q_bins
+
+    def _slide_path(self, pt_files_path, slide_id):
+        wsi_path = os.path.join(pt_files_path, '{}.pt'.format(slide_id))
+        if not os.path.exists(wsi_path):
+            wsi_path = glob.glob(os.path.join(pt_files_path, f'{slide_id}*.pt'))[0]
+        return wsi_path
+
+    def _preload_slides(self):
+        """Loads all the slides of the dataset patients in RAM, once, in the main process.
+        DataLoader workers are forked from it and share these tensors (copy-on-write): filling the
+        cache inside the workers instead gives one private copy per worker and per DataLoader."""
+        total_bytes = 0
+        for pid in self.patient_df.index:
+            pt_files_path = self.datasets[self.patient_df.loc[pid, "dataset_name"]].pt_files_path
+            for slide_id in self.slides_on_disk[pid]:
+                if slide_id not in self.slides_cache:
+                    wsi_bag = torch.load(self._slide_path(pt_files_path, slide_id), weights_only=True, map_location="cpu")
+                    self.slides_cache[slide_id] = wsi_bag
+                    total_bytes += wsi_bag.element_size() * wsi_bag.nelement()
+        print(f"Preloaded {len(self.slides_cache)} slides in RAM ({total_bytes / 1024**3:.1f} GB)")
 
     def _load_wsi_embs_from_path(self, dataset_name, slide_names):
             """
@@ -608,17 +585,11 @@ class Multimodal_Bio_Dataset(Dataset):
                         wsi_bag = self.slides_cache[slide_id]
                         num_patches = wsi_bag.shape[0]
                     else:
-                        wsi_path = os.path.join(pt_files_path, '{}.pt'.format(slide_id))
-                        if not os.path.exists(wsi_path):
-                            wsi_path=glob.glob(os.path.join(pt_files_path, f'{slide_id}*.pt'))[0]
-                        wsi_bag = torch.load(wsi_path, weights_only=True, map_location="cpu")
+                        wsi_bag = torch.load(self._slide_path(pt_files_path, slide_id), weights_only=True, map_location="cpu")
                         self.slides_cache[slide_id] = wsi_bag
                         num_patches = wsi_bag.shape[0]
                 else:
-                    wsi_path = os.path.join(pt_files_path, '{}.pt'.format(slide_id))
-                    if not os.path.exists(wsi_path):
-                        wsi_path=glob.glob(os.path.join(pt_files_path, f'{slide_id}*.pt'))[0]
-                    wsi_bag = torch.load(wsi_path, weights_only=True, map_location="cpu") # changed to True due to python warning
+                    wsi_bag = torch.load(self._slide_path(pt_files_path, slide_id), weights_only=True, map_location="cpu") # changed to True due to python warning
                     num_patches = wsi_bag.shape[0]
                 patch_features.append(wsi_bag)
                 slides_str_descriptor += slide_id + "#" + str(num_patches) + "|"
@@ -681,18 +652,15 @@ class Multimodal_Bio_Dataset(Dataset):
         else:
             WSI_status = True
         if (hasattr(self, 'normalized_genomics') and index not in self.normalized_genomics.index) or not hasattr(self, 'normalized_genomics'): # or (self.use_missing_modalities_tables and not row[self.missing_mod_rate]):          
-           genomics = {key: torch.zeros(self.genes_groups[key]["count"]) for key in self.genomics_group_name}
+           genomics = {key: torch.zeros(self.genes_groups[key].get("count", 0)) for key in self.genomics_group_name}
            genomics_status = False
         else:
             
             genomics = {}
             if hasattr(self, 'GE_selected_gene_set'):
+                row_i = self.genomics_arrays['rows'][index]
                 for key in self.genomics_group_name:
-                    ensg_gene_id_list = self.genes_groups[key]["ensg_gene_id"]
-                    missing_genes = [gene for gene in ensg_gene_id_list if gene not in self.normalized_genomics.columns]
-                    available_genes = [gene for gene in ensg_gene_id_list if gene in self.normalized_genomics.columns]
-                    
-                    genomics[key] = torch.tensor(self.normalized_genomics[available_genes].loc[index].values,dtype=torch.float32)
+                    genomics[key] = torch.from_numpy(self.genomics_arrays['arrays'][key][row_i].copy())
                 # In questo modo genomics_status è False se in train stiamo utilizzando 
                 # una condizione di missing modality simulata,
                 # ma la genomica viene caricata lo stesso cosi se il paziente finisce in test puo essere 
@@ -706,17 +674,14 @@ class Multimodal_Bio_Dataset(Dataset):
             else:
                 genomics_status = False
         if (hasattr(self, 'normalized_cnv') and index not in self.normalized_cnv.index) or not hasattr(self, 'normalized_cnv'):
-            cnv = {key: torch.zeros(self.genes_groups[key]["count"]) for key in self.cnv_group_name}
+            cnv = {key: torch.zeros(self.genes_groups[key].get("count", 0)) for key in self.cnv_group_name}
             cnv_status = False
         else:
             cnv = {}
             if hasattr(self, 'CNV_selected_gene_set'):
+                row_i = self.cnv_arrays['rows'][index]
                 for key in self.cnv_group_name:
-                    ensg_gene_id_list = self.genes_groups[key]["ensg_gene_id"]
-                    missing_genes = [gene for gene in ensg_gene_id_list if gene not in self.normalized_cnv.columns]
-                    available_genes = [gene for gene in ensg_gene_id_list if gene in self.normalized_cnv.columns]
-
-                    cnv[key] = torch.tensor(self.normalized_cnv[available_genes].loc[index].values, dtype=torch.float32)
+                    cnv[key] = torch.from_numpy(self.cnv_arrays['arrays'][key][row_i].copy())
                 # cnv_status = True
                 if self.use_missing_modalities_tables and \
                     (('cnv' in self.missing_mod_rate and not row[self.missing_mod_rate]) or\
@@ -755,8 +720,9 @@ class Multimodal_Bio_Dataset(Dataset):
         slide_list = self.slides_on_disk[row[self.case_id_name]]  # already filtered on disk (and by tissue type)
         if len(slide_list) == 0 or not 'WSI' in self.input_modalities:
             WSI_status = False
-            patch_features = torch.zeros((self.max_patches, self._wsi_feature_dim(dataset_name)))
-            mask = torch.zeros(self.max_patches)
+            n_placeholder = 1 if self.compact_missing_wsi else self.max_patches
+            patch_features = torch.zeros((n_placeholder, self._wsi_feature_dim(dataset_name)))
+            mask = torch.zeros(n_placeholder)
             slides_str_descriptor = ""
         else:
             patch_features, mask, slides_str_descriptor = self._load_wsi_embs_from_path(dataset_name, slide_list)

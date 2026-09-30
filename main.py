@@ -20,16 +20,24 @@ from dataloader.dataloader_multidataset import Multimodal_Bio_Dataset
 from dataloader.dataloader_utils import get_dataloaders
 from experiments.utils import import_class_from_path, ResultsStore
 import collections.abc
+import re
+import warnings
+import matplotlib
+matplotlib.use("Agg")  # plots are only saved (SLURM nodes have no display)
+
+# torch 2.0 internally still goes through TypedStorage when loading pickled models / tensors (torch.load):
+# harmless, but printed at every checkpoint and slide load
+warnings.filterwarnings("ignore", message="TypedStorage is deprecated")
 
 
-os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 
 # os.environ["TORCH_USE_CUDA_DSA"] = "1"
 print("CUDA Device Count: ", torch.cuda.device_count())
 print("PyTorch CUDA Version: ", torch.version.cuda)
 print("CUDA Available: ", torch.cuda.is_available())
 print("CUDNN version: ", torch.backends.cudnn.version())
-print("Device Name: ", torch.cuda.get_device_name(0))
+if torch.cuda.is_available():
+    print("Device Name: ", torch.cuda.get_device_name(0))
 
 # used to generate random names that will be appended to the
 # experiment name
@@ -78,6 +86,26 @@ def recursive_update(d, u):
         else:
             d[k] = v
     return d
+def list_split_files(splits):
+    """The split files of a KFold.splits entry: a folder (every file in it, sorted) or a list of files."""
+    if isinstance(splits, str):
+        return sorted(os.path.join(splits, f) for f in os.listdir(splits) if os.path.isfile(os.path.join(splits, f)))
+    return splits
+
+
+def read_split(split_path):
+    """(train, val, test) patient ids of a split file; a missing or empty column is None and, without a
+    test column, the val column is the test set. Columns are padded with NaN, so they are dropped."""
+    df = pd.read_csv(split_path)
+    column = lambda c: df[c].dropna().values.astype(str) if c in df.columns and df[c].notnull().any() else None
+    train, val, test = column("train"), column("val"), column("test")
+    if val is None and test is None:
+        raise ValueError(f"Fold {split_path} has no test patients")
+    if test is None:
+        test, val = val, None
+    return train, val, test
+
+
 if __name__ == "__main__":
     wandb.require("core")
     start_time = time.time()
@@ -143,12 +171,24 @@ if __name__ == "__main__":
             raise ValueError("config.data_loader.missing_modalities_tables.active must be True to set TRAINING_missing_mod_rate")
         config.data_loader.missing_modalities_tables.missing_mod_rate = args.TRAINING_missing_mod_rate
 
-    if args.TCGA_dataset_name is not None and 'BRCA' in config.data_loader.KFold.splits:
-        if len(config.data_loader.datasets_configs) == 1 and 'BRCA' in config.data_loader.datasets_configs[0]:
-            config.data_loader.datasets_configs[0] = config.data_loader.datasets_configs[0].replace("BRCA", args.TCGA_dataset_name)
-            config.data_loader.KFold.splits = config.data_loader.KFold.splits.replace("BRCA", args.TCGA_dataset_name)
-            config.title = f"{config.title}_{args.TCGA_dataset_name}_{config.seed}"
-            config.data_loader.missing_modality_table = config.data_loader.missing_modality_table.replace("BRCA", args.TCGA_dataset_name)
+    if args.TCGA_dataset_name is not None:
+        # run the same config on another TCGA cohort: the cohort of the (single) dataset yaml, e.g.
+        # config/TCGA_BLCA_dataset_UNI.yaml, is replaced in the dataset yaml, splits and missing table paths
+        if len(config.data_loader.datasets_configs) != 1:
+            raise ValueError("--TCGA_dataset_name needs exactly one dataset config")
+        match = re.search(r"TCGA_([A-Z]+)_", os.path.basename(config.data_loader.datasets_configs[0]))
+        if match is None:
+            raise ValueError(f"--TCGA_dataset_name: no TCGA_<COHORT>_ in {config.data_loader.datasets_configs[0]}")
+        old_cohort, new_cohort = match.group(1), args.TCGA_dataset_name.upper()
+        swap = lambda path: path.replace(f"TCGA_{old_cohort}", f"TCGA_{new_cohort}")
+        config.data_loader.datasets_configs[0] = swap(config.data_loader.datasets_configs[0])
+        config.data_loader.KFold.splits = swap(config.data_loader.KFold.splits)
+        if config.data_loader.get('missing_modality_table'):
+            config.data_loader.missing_modality_table = swap(config.data_loader.missing_modality_table)
+        for path in [config.data_loader.datasets_configs[0], config.data_loader.KFold.splits]:
+            if not os.path.exists(path):
+                raise ValueError(f"--TCGA_dataset_name {new_cohort}: {path} does not exist")
+        config.title = f"{config.title}_{new_cohort}_{config.seed}"
 
 
     for k, v in config.items():
@@ -162,6 +202,7 @@ if __name__ == "__main__":
 
     if args.debug:
         os.environ['WANDB_DISABLED'] = 'true'
+        torch.autograd.set_detect_anomaly(True)  # slow: only for debugging
 
     # Check if project_dir exists
     if not os.path.exists(config.project_dir):
@@ -195,7 +236,10 @@ if __name__ == "__main__":
     # make title unique to avoid overriding
     todays_date = date.today()
     now = datetime.now()
-    config.title = f'{config.title}_YY{todays_date.year}-MM{str(todays_date.month).zfill(2)}-DD{str(todays_date.day).zfill(2)}-HH{now.hour:02}-MM{now.minute:02}_{timehash()}'
+    # run name with the input modalities: the 31 modality combinations are otherwise indistinguishable
+    experiment_title = config.title
+    modalities_str = '+'.join(config.model.kwargs.input_modalities)
+    config.title = f'{config.title}_{modalities_str}_YY{todays_date.year}-MM{str(todays_date.month).zfill(2)}-DD{str(todays_date.day).zfill(2)}-HH{now.hour:02}-MM{now.minute:02}_{timehash()}'
     parent_directory = os.path.join(config.project_dir, config.title)
     config.parent_directory = parent_directory
     checkpoint_last_epoch = os.path.join(parent_directory, 'model_last_epoch.pt')
@@ -211,6 +255,11 @@ if __name__ == "__main__":
     logger.addHandler(file_handler)
 
     if args.verbose:
+        # the logging.info calls above already created the default stderr handler ("INFO:root:..."):
+        # replace it, otherwise every message is printed twice
+        for handler in list(logger.handlers):
+            if type(handler) is logging.StreamHandler:
+                logger.removeHandler(handler)
         stdout_handler = logging.StreamHandler(sys.stdout)
         stdout_handler.setFormatter(log_format)
         logger.addHandler(stdout_handler)
@@ -230,8 +279,15 @@ if __name__ == "__main__":
         name=wandb_name,
         config=unmunchify(config),
         mode="disabled" if args.debug else config.wandb.mode,  # an explicit mode overrides WANDB_DISABLED
+        group=experiment_title,  # runs of the same experiment (e.g. the modality combinations) grouped together
+        tags=[config.model.name] + list(config.model.kwargs.input_modalities),
         settings=wandb.Settings(_service_wait=900)
     )
+    # per-epoch curves (overall loss and c-index of each fold) are charts with the epoch as x-axis, so the
+    # folds overlay; they are kept out of the run summary, which has only the results/* keys
+    wandb.define_metric("Epoch", summary="none")
+    for key in ["LR", "Train/*", "Valid/*", "Test/*"]:
+        wandb.define_metric(key, step_metric="Epoch", summary="none")
 
     # THE FOLLOWING TRANSFORMATIONS MUST BE CREATED ACCORDINGLY TO THE DATALOADER/TRANSFORMS.PY, PREPROCESSING, AUGMENTATIONS AND CONFIG(DATALOADER.NORMALIZE) YAML FILES
     # THE FOLLOWING IS A TOY DATASET 
@@ -259,35 +315,41 @@ if __name__ == "__main__":
                             model_name = config.model.name if hasattr(config.model, 'name') else None,
                         )
     
-     # GET INDICES FOR TRAIN, VALIDATION, AND TEST SETS
-    train_patients, val_patients, test_patients = dataset.get_train_test_val_splits(
-                                                                                train_size=config.data_loader.train_size, 
-                                                                                val_size=config.data_loader.val_size, 
-                                                                                test_size=config.data_loader.test_size, 
-                                                                                random_state=config.data_loader.random_state
-                                                                                )
-    
-    
     if 'Genomics' in config.model.kwargs.input_modalities:
         config.model.kwargs.genomics_group_input_dim = [dataset.genes_groups[key]['count'] for key in dataset.genomics_group_name]
     if 'CNV' in config.model.kwargs.input_modalities:
         config.model.kwargs.cnv_group_input_dim = [dataset.genes_groups[key]['count'] for key in dataset.cnv_group_name]
-    
-    
-    train_dataloader, val_dataloader, test_dataloader = get_dataloaders(            
-                                                                        dataset=dataset,
-                                                                        train_patients=train_patients, 
-                                                                        val_patients=val_patients, 
-                                                                        test_patients=test_patients,
-                                                                        config=config
-                                                                        )
+    # CT / MRI embedding sizes from the dataset (same value as its zero placeholders): mednet 2048, else CT 768 / MRI 320
+    first_dataset = next(iter(dataset.datasets))
+    config.model.kwargs.ct_emb_dim = dataset._placeholder_shape('CT', first_dataset)[1] if 'CT' in config.model.kwargs.input_modalities else None
+    config.model.kwargs.mri_emb_dim = dataset._placeholder_shape('MRI', first_dataset)[1] if 'MRI' in config.model.kwargs.input_modalities else None
 
-    if config.scheduler.name=="OneCycleLR":
-        steps_per_epoch  = len(train_dataloader)
-        config.scheduler["steps_per_epoch"]=steps_per_epoch
+    # The random train/val/test split and the model below are used only by do_train / do_test / do_inference /
+    # reload: a k-fold only run builds its own loaders and models for each fold, so they are skipped
+    # (they cost dataloader workers, a model and a torch.compile, then were thrown away).
+    mm = None
+    if config.trainer.do_train or config.trainer.do_test or config.trainer.do_inference or config.trainer.reload:
+        # GET INDICES FOR TRAIN, VALIDATION, AND TEST SETS
+        train_patients, val_patients, test_patients = dataset.get_train_test_val_splits(
+                                                                                    train_size=config.data_loader.train_size, 
+                                                                                    val_size=config.data_loader.val_size, 
+                                                                                    test_size=config.data_loader.test_size, 
+                                                                                    random_state=config.data_loader.random_state
+                                                                                    )
+        train_dataloader, val_dataloader, test_dataloader = get_dataloaders(            
+                                                                            dataset=dataset,
+                                                                            train_patients=train_patients, 
+                                                                            val_patients=val_patients, 
+                                                                            test_patients=test_patients,
+                                                                            config=config
+                                                                            )
 
-    mm = ModelManager(config, ModelClass, results_store)
-    mm.net = torch.compile(mm.net)
+        if config.scheduler.name=="OneCycleLR":
+            steps_per_epoch  = len(train_dataloader)
+            config.scheduler["steps_per_epoch"]=steps_per_epoch
+
+        mm = ModelManager(config, ModelClass, results_store)
+        mm.net = torch.compile(mm.net)
     if config.trainer.reload:
         if not os.path.exists(config.trainer.checkpoint):
             logging.error(f'Checkpoint file does not exist: {config.trainer.checkpoint}')
@@ -343,100 +405,37 @@ if __name__ == "__main__":
     if config.trainer.do_test:
         logging.info('Testing the model...')
         
-        if type(config.data_loader.KFold.splits) is str:
-            path_files = config.data_loader.KFold.splits
-            lista_voci = os.listdir(path_files)
-            splits = sorted([os.path.join(path_files,f) for f in lista_voci if os.path.isfile(os.path.join(path_files, f))])
-        else:
-            splits = config.data_loader.KFold.splits
-
-        if config.missing_modality_test.active:
-            test_scenarios = config.missing_modality_test.scenarios
-            for i_scenario, scenario in enumerate(test_scenarios):   
+        splits = list_split_files(config.data_loader.KFold.splits)
+        # the base test set, or each missing modality scenario (the checkpoints of each fold are
+        # <checkpoint dir>/model_*_Fold_<k>.pt: evaluate() adds the fold suffix)
+        test_scenarios = config.missing_modality_test.scenarios if config.missing_modality_test.active else [None]
+        log_on_telegram = False if not hasattr(config, 'log_on_telegram') else config.log_on_telegram
+        for i_scenario, scenario in enumerate(test_scenarios):
+            if scenario is not None:
                 print('Testing the model with missing modality scenario:', scenario)
-                for i, split_path in enumerate(splits):            
-                    foldname = f"Fold_{i+1}"
-                    logging.info(f'Fold {i+1}...')
-                    split_df = pd.read_csv(split_path)
-                    has_val = "val" in split_df.columns and split_df['val'].notnull().any()
-                    has_test = "test" in split_df.columns and split_df['test'].notnull().any()
-                    if not has_val and not has_test:
-                        raise ValueError(f"Fold {split_path} has no test patients")
-                    if has_test:
-                        test_patients = split_df["test"].dropna().values.astype(str)
-                    else:
-                        test_patients = split_df["val"].dropna().values.astype(str)
+            for i, split_path in enumerate(splits):
+                foldname = f"Fold_{i+1}"
+                logging.info(f'Fold {i+1}...')
+                _, _, test_patients = read_split(split_path)
+                _, _, test_dataloader = get_dataloaders(dataset=dataset, train_patients=None, val_patients=None,
+                                                        test_patients=test_patients, config=config)
+                mm.evaluate(test_dataloader,
+                            task_type=config.data_loader.task_type,
+                            checkpoint_last_epoch=os.path.join(config.trainer.checkpoint, 'model_last_epoch.pt'),
+                            checkpoint_model_highest_metric=os.path.join(config.trainer.checkpoint, 'model_highest_metric.pt'),
+                            checkpoint_model_lowest_loss=os.path.join(config.trainer.checkpoint, 'model_lowest_loss.pt'),
+                            best=True,
+                            device=config.model.device,
+                            path=f"{parent_directory}",
+                            kfold=foldname,
+                            log_aggregated = i==len(splits)-1,
+                            log_on_telegram = log_on_telegram,
+                            Save_XA_attention_files = config.trainer.Save_XA_attention_files,
+                            eval_missing_modality_scenario = scenario,
+                            print_demo_results = args.demo_test and scenario is not None and i_scenario==len(test_scenarios)-1 and i==len(splits)-1,
+                            is_demo_test=args.demo_test,
+                            repo_path=repo_dir)
 
-                    train_dataloader, val_dataloader, test_dataloader = get_dataloaders(    
-                                                                                    dataset=dataset,
-                                                                                    train_patients=None, 
-                                                                                    val_patients=None, 
-                                                                                    test_patients=test_patients,
-                                                                                    config=config
-                                                                                )
-
-                    checkpoint_last_epoch=os.path.join(config.trainer.checkpoint,f'model_last_epoch.pt')
-                    checkpoint_model_lowest_loss = os.path.join(config.trainer.checkpoint, f'model_lowest_loss.pt')
-                    checkpoint_model_highest_metric = os.path.join(config.trainer.checkpoint, f'model_highest_metric.pt') 
-                    log_on_telegram = False if not hasattr(config, 'log_on_telegram') else config.log_on_telegram
-
-                    mm.evaluate(test_dataloader, 
-                                task_type=config.data_loader.task_type, 
-                                checkpoint_last_epoch=checkpoint_last_epoch, 
-                                checkpoint_model_highest_metric=checkpoint_model_highest_metric,
-                                checkpoint_model_lowest_loss=checkpoint_model_lowest_loss,
-                                best=True, 
-                                device=config.model.device, 
-                                path=f"{parent_directory}", 
-                                kfold=foldname,
-                                log_aggregated = i==len(splits)-1,
-                                log_on_telegram = log_on_telegram,
-                                Save_XA_attention_files = config.trainer.Save_XA_attention_files,
-                                eval_missing_modality_scenario = scenario,
-                                print_demo_results = args.demo_test and i_scenario==len(test_scenarios)-1 and i==len(splits)-1 ,
-                                is_demo_test=args.demo_test,
-                                repo_path=repo_dir)
-        else:
-            for i, split_path in enumerate(splits):            
-                    foldname = f"Fold_{i+1}"
-                    logging.info(f'Fold {i+1}...')
-                    split_df = pd.read_csv(split_path)
-                    has_val = "val" in split_df.columns and split_df['val'].notnull().any()
-                    has_test = "test" in split_df.columns and split_df['test'].notnull().any()
-                    if not has_val and not has_test:
-                        raise ValueError(f"Fold {split_path} has no test patients")
-                    if has_test:
-                        test_patients = split_df["test"].dropna().values.astype(str)
-                    else:
-                        test_patients = split_df["val"].dropna().values.astype(str)
-
-                    train_dataloader, val_dataloader, test_dataloader = get_dataloaders(    
-                                                                                    dataset=dataset,
-                                                                                    train_patients=None, 
-                                                                                    val_patients=None, 
-                                                                                    test_patients=test_patients,
-                                                                                    config=config
-                                                                                )
-
-                    checkpoint_last_epoch=os.path.join(config.trainer.checkpoint,f'model_last_epoch_Fold_{i+1}.pt')
-                    checkpoint_model_lowest_loss = os.path.join(config.trainer.checkpoint, f'model_lowest_loss_Fold_{i+1}.pt')
-                    checkpoint_model_highest_metric = os.path.join(config.trainer.checkpoint, f'model_highest_metric_Fold_{i+1}.pt') 
-                    log_on_telegram = False if not hasattr(config, 'log_on_telegram') else config.log_on_telegram
-
-                    mm.evaluate(test_dataloader, 
-                        task_type=config.data_loader.task_type, 
-                        checkpoint_last_epoch=checkpoint_last_epoch, 
-                        checkpoint_model_highest_metric=checkpoint_model_highest_metric,
-                        checkpoint_model_lowest_loss=checkpoint_model_lowest_loss,
-                        best=True, 
-                        device=config.model.device, 
-                        path=f"{parent_directory}", 
-                        kfold=foldname,
-                        log_aggregated = i==len(splits)-1,
-                        log_on_telegram = log_on_telegram,
-                        Save_XA_attention_files = config.trainer.Save_XA_attention_files,
-                        repo_path=repo_dir)
-                        
     # Test the model
     if config.trainer.do_inference:
         logging.info('Inference...')
@@ -453,16 +452,10 @@ if __name__ == "__main__":
     if config.trainer.do_kfold:
         logging.info('K-Fold...')
 
-        if type(config.data_loader.KFold.splits) is str:
-            path_files = config.data_loader.KFold.splits
-            lista_voci = os.listdir(path_files)
-            splits = sorted([os.path.join(path_files,f) for f in lista_voci if os.path.isfile(os.path.join(path_files, f))])
-        else:
-            splits = config.data_loader.KFold.splits
-
+        splits = list_split_files(config.data_loader.KFold.splits)
         
         for i, split_path in enumerate(splits):            
-            del mm
+            mm = None  # free the previous fold's model before building the next one
             torch.cuda.empty_cache()
             # Setup to be deterministic
             logging.info(f'setup to be deterministic')
@@ -471,43 +464,17 @@ if __name__ == "__main__":
             logging.info(f'Fold {i+1}...')
             if f"{i}.csv" not in split_path:
                 print('Loading split', split_path.split('/')[-1])
-            split_df = pd.read_csv(split_path)
-            
-            has_val = "val" in split_df.columns and split_df['val'].notnull().any()
-            has_test = "test" in split_df.columns and split_df['test'].notnull().any()
-            if 'train' not in split_df.columns or not split_df['train'].notnull().any():
+            train_patients, val_patients, test_patients = read_split(split_path)
+            if train_patients is None:
                 raise ValueError(f"Fold {split_path} has no training patients")
-
-            if not has_val and not has_test:
-                raise ValueError(f"Fold {split_path} has no test patients")
-            train_patients = split_df["train"].values.astype(str)
-
             if config.data_loader.KFold.internal_val_size > 0.0:
-                if has_val and has_test:
-                    # unisco la colonna di val e train
-                    val_patients = split_df["val"].dropna().values.astype(str)
+                # validation set drawn from the training patients (a val column of the split joins them)
+                if val_patients is not None:
                     train_patients = np.concatenate((train_patients, val_patients))
-                elif has_val:
-                    test_patients = split_df["val"].dropna().values.astype(str)
-                else:
-                    test_patients = split_df["test"].dropna().values.astype(str)
                 np.random.shuffle(train_patients)
-                val_patients = train_patients[:int(len(train_patients)*config.data_loader.KFold.internal_val_size)]
-                train_patients = train_patients[int(len(train_patients)*config.data_loader.KFold.internal_val_size):]
-                len_val = len(val_patients)
-            else:
-                if has_val and has_test:
-                    val_patients = split_df["val"].dropna().values.astype(str)
-                    test_patients = split_df["test"].dropna().values.astype(str)
-                    len_val = len(val_patients)
-                elif has_val:
-                    test_patients = split_df["val"].dropna().values.astype(str)
-                    val_patients = None
-                    len_val = 0
-                else:
-                    test_patients = split_df["test"].dropna().values.astype(str)
-                    val_patients = None
-                    len_val = 0                     
+                n_val = int(len(train_patients)*config.data_loader.KFold.internal_val_size)
+                val_patients, train_patients = train_patients[:n_val], train_patients[n_val:]
+            len_val = len(val_patients) if val_patients is not None else 0
             
             if "Genomics" in config.model.kwargs.input_modalities:
                 dataset.normalize_genomics(train_patients, val_patients, test_patients)
@@ -522,9 +489,11 @@ if __name__ == "__main__":
                                                                                 )
             len_train = len(train_dataloader.dataset)
             len_test = len(test_dataloader.dataset)
+            # evaluate() tests the lowest-loss / highest-metric checkpoints when they exist (with a validation
+            # set), and always the last epoch one
+            best = True
             if val_patients is not None:
                 len_val = len(val_dataloader.dataset)
-                best = True
             print("{} has Train: {}, Val: {}, Test: {} patients".format(foldname, len_train, len_val, len_test))
             
             

@@ -3,30 +3,18 @@ from tqdm import tqdm
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.backends import cudnn
 import torch.nn.functional as F
 import wandb
-import logging, datetime
-from scipy import stats
-import math
+import logging, datetime, sys, time
 from .loss.loss_func import NLLSurvLoss
-from sksurv.metrics import concordance_index_censored
-import numpy as np
 import pandas as pd
 from lifelines import KaplanMeierFitter
 from lifelines.statistics import logrank_test
-from sklearn.metrics import roc_auc_score, confusion_matrix,f1_score, recall_score, balanced_accuracy_score
+from sklearn.metrics import roc_auc_score, f1_score, recall_score, balanced_accuracy_score
 import matplotlib.pyplot as plt
-import seaborn as sns
-import yaml
-import io, copy
-#import psutil
-from PIL import Image
-from .utils import accuracy_confusionMatrix_plot, kfold_results_merge, move_to_device, import_class_from_path
+import copy
+from .utils import accuracy_confusionMatrix_plot, move_to_device, safe_c_index, km_risk_groups_plot
 import os
-# from .metrics.loss_func import NLLSurvLoss
-# from .scheduler import *
-from adam_atan2_pytorch import AdoptAtan2
 DEBUG_BATCHES = 8
 
 class ModelManager():
@@ -41,33 +29,13 @@ class ModelManager():
         self.real_batch_size = config.data_loader.real_batch_size
         self.NUM_ACCUMULATION_STEPS = self.real_batch_size//config.data_loader.batch_size
         self.attention_dir_check = False
-        self.datasets_list = config.data_loader.datasets_configs
         model_kwargs = config.model.kwargs
-        yaml_path = self.datasets_list[0]
-        with open(yaml_path, 'r') as file:
-            yaml_data = yaml.safe_load(file)
-        if 'CT' in model_kwargs.get('input_modalities', []):
-            ct_path = yaml_data.get('parameters', {}).get('ct_path', '')
-            if 'mednet' in ct_path:
-                ct_emb_dim = 2048
-            else:
-                ct_emb_dim = 768
-        if 'MRI' in model_kwargs.get('input_modalities', []):
-            mri_path = yaml_data.get('parameters', {}).get('mri_path', '')
-            if 'mednet' in mri_path:
-                mri_emb_dim = 2048
-            else:
-                mri_emb_dim = 320
-        model_kwargs['ct_emb_dim'] = ct_emb_dim if 'CT' in model_kwargs.get('input_modalities', []) else None   
-        model_kwargs['mri_emb_dim'] = mri_emb_dim if 'MRI' in model_kwargs.get('input_modalities', []) else None
+        # ct_emb_dim / mri_emb_dim: feature size of the CT / MRI embeddings, set by main.py from the dataset
+        model_kwargs.setdefault('ct_emb_dim', None)
+        model_kwargs.setdefault('mri_emb_dim', None)
         self.net = ModelClass(**model_kwargs) 
         self.net.to(self.device)
 
-        if self.config.data_loader.batch_size <= self.config.data_loader.real_batch_size:
-            reduction = 'mean'
-        else:
-            reduction = 'none'
-            self.num_replicas = self.config.data_loader.batch_size // self.config.data_loader.real_batch_size
         self.loss_function = self.__getLossFunction__()
         self.parameters_to_optimize = self.net.parameters()
         self.optimizer = self.__getOptimizer__()
@@ -80,8 +48,13 @@ class ModelManager():
             self.clip_grad_norm_max_norm = self.config.trainer.clip_grad_norm_max_norm
         except:
             self.clip_grad_norm_max_norm = None
-        wandb.watch(self.net, log_freq=100)
-        # self.process = psutil.Process(os.getpid())
+        # the test set is evaluated at every epoch only for logging (it is evaluated anyway at the end
+        # by evaluate()): off by default, on if asked or needed by the per-epoch missing modality test
+        missing_modality_test = config.get('missing_modality_test', {})
+        self.test_each_epoch = config.trainer.get('test_each_epoch', False) or \
+            (missing_modality_test.get('active', False) and missing_modality_test.get('test_scenarios_on_each_epoch', False))
+        if config.get('wandb', {}).get('watch', False):  # gradient/parameter logging, adds hooks on every parameter
+            wandb.watch(self.net, log_freq=100)
         
         
     def __getLossFunction__(self):
@@ -98,6 +71,7 @@ class ModelManager():
 
     def __getOptimizer__(self):
         if self.config.optimizer.name == "AdoptAtan2":
+            from adam_atan2_pytorch import AdoptAtan2  # optional dependency, only for this optimizer
             return AdoptAtan2(self.net.parameters(), 
                               lr = self.config.optimizer.learning_rate)
         elif self.config.optimizer.name == "Adam":
@@ -172,6 +146,61 @@ class ModelManager():
         else:
             return split_path.strip("/").split("/")[-1]
 
+    def _loss(self, outputs, labels, censorships, task_type):
+        """Task loss of one batch (without the model specific terms added in training)."""
+        if task_type == "Survival":
+            return self.loss_function(outputs, labels, None, censorships)
+        if task_type == "Treatment_Response":
+            return self.loss_function(outputs, labels.squeeze(1))
+        raise Exception(f"{task_type} is not supported!")
+
+    def _run_eval(self, loader, task_type, device, debug=False, model=None, scenario=None, on_batch=None):
+        """No-grad pass over a loader (validation / test, optionally a missing modality scenario):
+        returns (log_dict with the predictions, loss averaged over the batches weighted by their size).
+        on_batch(batch, step_result) is called after each batch (e.g. to save attentions)."""
+        log_dict = self.initialize_metrics_dict(task_type)
+        losses, weights = [], []
+        with torch.inference_mode():
+            for batch_numb, (idx, batch) in enumerate(self._batches(loader)):
+                if debug and batch_numb == DEBUG_BATCHES:
+                    break
+                step_result = self.step(batch, log_dict, task_type, device, model, scenario, is_eval=True)
+                log_dict = step_result['log_dict']
+                loss = self._loss(step_result['outputs'], step_result['labels'], step_result['censorships'], task_type)
+                if self.config.data_loader.batch_size <= self.config.data_loader.real_batch_size:
+                    losses.append(loss.item())
+                else:
+                    losses.append(loss.detach().mean().item())
+                weights.append(batch["label"].size(dim=0))
+                if on_batch is not None:
+                    on_batch(batch, step_result)
+        return log_dict, np.average(np.array(losses), weights=weights)
+
+    @staticmethod
+    def _fold_checkpoint(path, kfold):
+        """<checkpoint>_<fold>.pt (unchanged if it already has the fold suffix)."""
+        root, ext = os.path.splitext(path)
+        suffix = f"_{kfold}"
+        return path if root.endswith(suffix) else f"{root}{suffix}{ext}"
+
+    @staticmethod
+    def _safe_c_index(censorships, event_times, risk_scores):
+        """c-index, NaN when it is undefined (fewer than 2 patients or no events, e.g. the patients of one
+        dataset in a test fold) instead of raising and stopping the run."""
+        return safe_c_index(censorships, event_times, risk_scores)
+
+    @staticmethod
+    def _batches(loader):
+        """enumerate(loader) with a progress bar only in an interactive terminal: in a log file
+        (SLURM, redirected output) tqdm cannot redraw the bar and writes one line per update."""
+        return tqdm(enumerate(loader), total=len(loader), leave=False, disable=not sys.stderr.isatty())
+
+    @staticmethod
+    def _summary(metrics_dict, loss, seconds, task_type):
+        main_metric = "c-index" if task_type == "Survival" else "AUC"
+        value = metrics_dict.get(main_metric, float('nan'))
+        return f"loss {loss:.4f}, {main_metric} {value:.4f} ({seconds:.0f}s)"
+
     def calculate_risk(self, h):
         r"""
         Take the logits of the model and calculate the risk for the patient 
@@ -210,8 +239,9 @@ class ModelManager():
         metrics_dict = {}
         all_risk_scores = np.array(log_dict["all_risk_scores"])
         all_censorships = np.array(log_dict["all_censorships"])
-        all_event_times = np.array(log_dict["all_event_times"])
-        c_index = concordance_index_censored((1-all_censorships).astype(bool), all_event_times, all_risk_scores, tied_tol=1e-08)[0]
+        # c-index on the follow-up time in days (all_event_times are the discretized bins of the loss)
+        all_original_event_times = np.array(log_dict["all_original_event_times"])
+        c_index = self._safe_c_index(all_censorships, all_original_event_times, all_risk_scores)
         metrics_dict["c-index"] = c_index
         return metrics_dict    
 
@@ -221,7 +251,8 @@ class ModelManager():
             all_censorships = log_df["all_censorships"].values
             all_event_times = log_df["all_event_times"].values
             outputs = log_df["survival_predictions"].values
-            c_index = concordance_index_censored((1-all_censorships).astype(bool), all_event_times, all_risk_scores, tied_tol=1e-08)[0]
+            # c-index on the follow-up time in days; the loss on the discretized time bins (all_event_times)
+            c_index = self._safe_c_index(all_censorships, log_df["all_original_event_times"].values, all_risk_scores)
             loss = self.loss_function(torch.tensor(outputs.tolist()), torch.tensor(all_event_times).unsqueeze(-1), None, torch.tensor(all_censorships).unsqueeze(-1))
             metrics_dict = {"c-index": c_index, "Loss": loss}
         elif task_type == "Treatment_Response":
@@ -258,17 +289,18 @@ class ModelManager():
             raise Exception(f"{task_type} is not supported!")
         return metrics_dict
 
-    def compute_metrics_df(self, log_df, task_type="Survival"):
+    def compute_metrics_df(self, log_df, task_type="Survival", per_dataset=True):
+        """Metrics on all the patients, plus <dataset>_<metric> for each dataset if per_dataset
+        (per-epoch curves use only the overall ones: per-dataset results are in the final tables)."""
         metrics_dict = {}        
         curr_metrics_dict = self.compute_metrics(log_df, task_type)
         metrics_dict.update(curr_metrics_dict)
 
-        dataset_names = log_df["dataset_name"].unique()
+        dataset_names = log_df["dataset_name"].unique() if per_dataset else []
         for dataset in dataset_names:
             dataset_df = log_df[log_df["dataset_name"]==dataset]
             curr_metrics_dict = self.compute_metrics(dataset_df, task_type)
             for key, value in curr_metrics_dict.items():
-                metrics_dict[f"{dataset}_{key}"] = value
                 metrics_dict[f"{dataset}_{key}"] = value
                         
         metrics_dict = {k: v.item() if isinstance(v, torch.Tensor) else v for k, v in metrics_dict.items()}
@@ -337,7 +369,6 @@ class ModelManager():
             batch_data = self.adjust_status(batch_data, eval_missing_modality_scenario)
             
         labels = batch['label'] #  check this casting        
-        #batch_data = {key: value.to(device) if isinstance(value, torch.Tensor) else value for key, value in batch_data.items()} 
         batch_data = move_to_device(batch_data, device)
         labels = labels.to(device)   
                  
@@ -345,7 +376,6 @@ class ModelManager():
             labels = labels.reshape(-1,1)    
   
         model = model if model != None else self.net
-        # torch.cuda.synchronize()
         if model.__class__.__name__ == "MUSE":
             if not is_eval:
                 result = model(batch_data, labels)
@@ -353,7 +383,6 @@ class ModelManager():
                 result = model.inference(batch_data)
         else:
             result = model(batch_data) # per TITANS funziona model(batch_data['patch_features'].squeeze(0).long())
-        # torch.cuda.synchronize()
         outputs = result['output']
 
         if task_type == "Survival":
@@ -422,20 +451,20 @@ class ModelManager():
         model_lowest_loss = None
 
         if kfold != "":
-            checkpoint_splitted_last = checkpoint_last_epoch.split(".")
-            checkpoint_last_epoch = f"{checkpoint_splitted_last[0]}{df_fold_suffix}.pt"
+            root, ext = os.path.splitext(checkpoint_last_epoch)  # not split("."): paths may contain dots
+            checkpoint_last_epoch = f"{root}{df_fold_suffix}{ext}"
 
 
-
+        if kfold != "":
+            logging.info(f'Starting training for {kfold}')
         for epoch in range(self.config.trainer.epochs):
             if STOP:
-                logging.info(f'\nSTOPPED at epoch {epoch}')
+                logging.info(f'STOPPED at epoch {epoch}')
                 break
-            if kfold != "":
-                logging.info(f'\nStarting training for {kfold}')
-            logging.info('\nStarting epoch {}/{}, LR = {}'.format(epoch + 1, self.config.trainer.epochs,
-                                                                  self.scheduler.get_last_lr()))
+            logging.info('Starting epoch {}/{}, LR = {}'.format(epoch + 1, self.config.trainer.epochs,
+                                                                self.scheduler.get_last_lr()))
             tloss = []
+            epoch_start = time.time()
 
             batch_numb = 0
             log_dict = {}
@@ -447,7 +476,7 @@ class ModelManager():
                     logging.info(f'Robust training is enabled for training')
                     train_dataloader.dataset.dataset.set_robust_training_on()
             
-            for idx, batch in tqdm(enumerate(train_dataloader)):
+            for idx, batch in self._batches(train_dataloader):
                 if debug and batch_numb == DEBUG_BATCHES:
                     print("DEBUG_BATCHES value reached")
                     break
@@ -455,7 +484,6 @@ class ModelManager():
                     log_dict = self.initialize_metrics_dict(task_type)
 
                 step_result = self.step(batch, log_dict, task_type, device)
-                # self.save_XA_attentions(batch, step_result, path, partition="train", epoch="last") # remove it! it is here for debugging
                         
                 outputs = step_result['outputs'] 
                 labels = step_result['labels'] 
@@ -463,29 +491,18 @@ class ModelManager():
                 log_dict = step_result['log_dict']
 
 
-
                 if self.config.data_loader.batch_size <= self.config.data_loader.real_batch_size:
-                    if task_type == "Survival":
-                        loss = self.loss_function(outputs, labels, None, censorships)
-                        if self.net.__class__.__name__ in ["MUSE", "ProSurv"]:
-                            loss += step_result["partial_loss"]
-                            
-                    elif task_type == "Treatment_Response":
-                        if self.AEM_lamda > 0:
-                            attention = step_result['attention']
-                            bag_loss = self.loss_function(outputs, labels.squeeze(1))
-                            div_loss = torch.sum(F.softmax(attention, dim=-1) * F.log_softmax(attention, dim=-1))
-                            loss = self.AEM_lamda * div_loss + bag_loss
-                        else:
-                           loss = self.loss_function(outputs, labels.squeeze(1))
-                    else:
-                        raise Exception(f"{task_type} is not supported!")
+                    loss = self._loss(outputs, labels, censorships, task_type)
+                    if task_type == "Survival" and self.net.__class__.__name__ in ["MUSE", "ProSurv"]:
+                        loss += step_result["partial_loss"]
+                    if task_type == "Treatment_Response" and self.AEM_lamda > 0:
+                        attention = step_result['attention']
+                        div_loss = torch.sum(F.softmax(attention, dim=-1) * F.log_softmax(attention, dim=-1))
+                        loss = self.AEM_lamda * div_loss + loss
 
                     loss = loss / self.NUM_ACCUMULATION_STEPS
                     tloss.append(loss.item()*self.NUM_ACCUMULATION_STEPS)
-                    # torch.cuda.synchronize()
                     loss.backward()
-                    # torch.cuda.synchronize()
                     if ((idx + 1) % self.NUM_ACCUMULATION_STEPS == 0):
                         if self.clip_grad_norm_max_norm is not None:
                             torch.nn.utils.clip_grad_norm_(self.net.parameters(), 
@@ -503,23 +520,16 @@ class ModelManager():
             tloss = np.mean(tloss) # bisognerebbe cambiarlo in base alla reduction della loss
             trainLoss.append(tloss)
             train_df = pd.DataFrame(log_dict)            
-            # train_df.to_hdf(f"{path}/train_df{df_fold_suffix}.h5", key="df", mode="w")
-            train_metrics_dict = self.compute_metrics_df(train_df, task_type)
+            train_metrics_dict = self.compute_metrics_df(train_df, task_type, per_dataset=False)
             train_metrics_df = pd.DataFrame(train_metrics_dict, index=[0])
-            # train_metrics_df.to_csv(f"{path}/train_metrics{df_fold_suffix}.csv")
+            logging.info(f"Epoch {epoch + 1}/{self.config.trainer.epochs} train: " +
+                         self._summary(train_metrics_dict, tloss, time.time() - epoch_start, task_type))
             if task_type == "Treatment_Response":
                 train_confusion_matrix = accuracy_confusionMatrix_plot(log_dict, train_metrics_df)
             # self.KaplanMeier_plot(log_dict, train_dataloader.dataset.dataset.bins.astype(int))
-            # self.predTime_vs_actualTime_confusionMatrix_plot(log_dict)
             to_log = {
                     f'Epoch': epoch + 1,
                     f'LR': self.optimizer.param_groups[0]['lr'],
-                    f'dataset_name': self.get_dataset_name(),
-                    f'modality_setting': self.config.data_loader.missing_modalities_tables.missing_mod_rate
-                    # f'Train/Loss': tloss,
-                    # f'Train/c-index': train_metrics_dict["c-index"],
-                    # f'Valid/Loss': vloss,
-                    # f'Valid/c-index': val_metrics_dict["c-index"],
                     }
             for key, value in train_metrics_dict.items():
                 to_log[f'Train{log_fold_string}/{key}'] = value
@@ -531,182 +541,46 @@ class ModelManager():
                     train_dataloader.dataset.dataset.set_robust_training_off()
 
             if eval_dataloader is not None:
+                eval_start = time.time()
                 self.net.eval()
-                vloss = []
-                vlossWeights = []
-                batch_numb = 0
-                with torch.inference_mode():
-                    for idx, batch in tqdm(enumerate(eval_dataloader)):
-                        if debug and batch_numb == DEBUG_BATCHES:
-                            breakTreatment_ResponseAggg
-                        if idx == 0:
-                            log_dict = self.initialize_metrics_dict(task_type)
-                            
-                        step_result = self.step(batch, log_dict, task_type, device, is_eval=True)
-                        
-                        outputs = step_result['outputs'] 
-                        labels = step_result['labels'] 
-                        censorships = step_result['censorships'] 
-                        log_dict = step_result['log_dict']
-                        if task_type == "Survival":
-                            loss = self.loss_function(outputs, labels, None, censorships)
-                        elif task_type == "Treatment_Response":
-                            loss = self.loss_function(outputs, labels.squeeze(1))
-                        else:
-                            raise Exception(f"{task_type} is not supported!")
-                        if self.config.data_loader.batch_size <= self.config.data_loader.real_batch_size:
-                            vloss.append(loss.item())
-                        else:
-                            vloss.append(loss.detach().mean().item())
-                        vlossWeights.append(batch["label"].size(dim=0))
-                        batch_numb += 1
-                vloss = np.array(vloss)
-                vloss = np.average(vloss, weights=vlossWeights)
-                # vloss = np.sum(vloss)
+                log_dict, vloss = self._run_eval(eval_dataloader, task_type, device, debug=debug)
                 validationLoss.append(vloss)
-                val_df = pd.DataFrame(log_dict)                
-                # val_df.to_hdf(f"{path}/val_df{df_fold_suffix}.h5", key="df", mode="w")
-                val_metrics_dict = self.compute_metrics_df(val_df, task_type)
+                val_metrics_dict = self.compute_metrics_df(pd.DataFrame(log_dict), task_type, per_dataset=False)
+                logging.info(f"Epoch {epoch + 1}/{self.config.trainer.epochs} valid: " +
+                             self._summary(val_metrics_dict, vloss, time.time() - eval_start, task_type))
                 if task_type == "Treatment_Response":
                     val_metric_monitor = (val_metrics_dict['AUC'] + val_metrics_dict['F1-Score']) / 2 
+                    val_confusion_matrix = accuracy_confusionMatrix_plot(log_dict, pd.DataFrame(val_metrics_dict, index=[0]))
                 else:
                     val_metric_monitor = val_metrics_dict["c-index"]
-                                
-                val_metrics_df = pd.DataFrame(val_metrics_dict, index=[0])
-                # val_metrics_df.to_csv(f"{path}/val_metrics{df_fold_suffix}.csv")
-                if task_type == "Treatment_Response":
-                    val_confusion_matrix = accuracy_confusionMatrix_plot(log_dict, val_metrics_df)
                 for key, value in val_metrics_dict.items():
                     to_log[f'Valid{log_fold_string}/{key}'] = value
 
-
-            if test_dataloader is not None:
-                self.net.eval()
-                ttloss = []
-                ttlossWeights = []
-                batch_numb = 0
-                with torch.inference_mode():
-                    for idx, batch in tqdm(enumerate(test_dataloader)):
-                        if debug and batch_numb == DEBUG_BATCHES:
-                            break
-                        if idx == 0:
-                            log_dict = self.initialize_metrics_dict(task_type)
-
-                        step_result = self.step(batch, log_dict, task_type, device, is_eval=True)
-                        # self.save_XA_attentions(batch, step_result, path, partition="test", epoch="last")
-                        
-                        outputs = step_result['outputs'] 
-                        labels = step_result['labels'] 
-                        censorships = step_result['censorships'] 
-                        log_dict = step_result['log_dict']
-                        
-                        if task_type == "Survival":
-                            loss = self.loss_function(outputs, labels, None, censorships)
-                        elif task_type == "Treatment_Response":
-                            loss = self.loss_function(outputs, labels.squeeze(1))
-                        else:
-                            raise Exception(f"{task_type} is not supported!")
-                        if self.config.data_loader.batch_size <= self.config.data_loader.real_batch_size:
-                            ttloss.append(loss.item())
-                        else:
-                            ttloss.append(loss.detach().mean().item())
-                        ttlossWeights.append(batch["label"].size(dim=0))
-                        batch_numb += 1
-                ttloss = np.array(ttloss)
-                ttloss = np.average(ttloss, weights=ttlossWeights)
-                # ttloss = np.sum(ttloss)
-                testLoss.append(ttloss)
-                test_df = pd.DataFrame(log_dict)                
-                # test_df.to_hdf(f"{path}/test_df{df_fold_suffix}.h5", key="df", mode="w")
-                test_metrics_dict = self.compute_metrics_df(test_df, task_type)
-                test_metrics_df = pd.DataFrame(test_metrics_dict, index=[0])
-                # test_metrics_df.to_csv(f"{path}/test_metrics{df_fold_suffix}.csv")
-                if task_type == "Treatment_Response":
-                    test_confusion_matrix = accuracy_confusionMatrix_plot(log_dict, test_metrics_df)
-
-                test_log = {} 
-                for key, value in test_metrics_dict.items():
-                    test_log[f'Test{log_fold_string}/{key}'] = value
-                
-                to_log.update(test_log) 
-                if task_type == "Treatment_Response":
-                    plot_to_log = {
-                        f"Train{log_fold_string}/Confusion_Matrix": wandb.Image(train_confusion_matrix),
-                    }
-                    if eval_dataloader is not None:
-                        plot_to_log[f"Valid{log_fold_string}/Confusion_Matrix"] = wandb.Image(val_confusion_matrix)
-                    if test_dataloader is not None:
-                        plot_to_log[f"Test{log_fold_string}/Confusion_Matrix"] = wandb.Image(test_confusion_matrix)
-                    to_log.update(plot_to_log) 
-
-                # Stesso codice ma adattato per testare anche i missing mod scenarios
+            if test_dataloader is not None and self.test_each_epoch:
+                # the base test set, then (if asked) each missing modality scenario on the same patients
+                scenarios = [None]
                 if config.missing_modality_test.active and config.missing_modality_test.test_scenarios_on_each_epoch:
-                    for scenario in config.missing_modality_test.scenarios:
-                        eval_missing_modality_scenario_suffix = f"_{scenario}"
-                        emms_suffix = eval_missing_modality_scenario_suffix
-                        
-                        ttloss = []
-                        ttlossWeights = []
-                        batch_numb = 0
-                        with torch.inference_mode():
-                            for idx, batch in tqdm(enumerate(test_dataloader)):
-                                if debug and batch_numb == DEBUG_BATCHES:
-                                    break
-                                if idx == 0:
-                                    log_dict = self.initialize_metrics_dict(task_type)
-                                
-                                step_result = self.step(batch, log_dict, task_type, device, 
-                                                        eval_missing_modality_scenario=scenario)
-                                # self.save_XA_attentions(batch, step_result, path, partition="test", epoch="last")
-                                
-                                outputs = step_result['outputs'] 
-                                labels = step_result['labels'] 
-                                censorships = step_result['censorships'] 
-                                log_dict = step_result['log_dict']
-                                
-                                if task_type == "Survival":
-                                    loss = self.loss_function(outputs, labels, None, censorships)
-                                elif task_type == "Treatment_Response":
-                                    loss = self.loss_function(outputs, labels.squeeze(1))
-                                else:
-                                    raise Exception(f"{task_type} is not supported!")
-                                if self.config.data_loader.batch_size <= self.config.data_loader.real_batch_size:
-                                    ttloss.append(loss.item())
-                                else:
-                                    ttloss.append(loss.detach().mean().item())
-                                ttlossWeights.append(batch["label"].size(dim=0))
-                                batch_numb += 1
-                        ttloss = np.array(ttloss)
-                        ttloss = np.average(ttloss, weights=ttlossWeights)
-                        # ttloss = np.sum(ttloss)
-                        testLoss.append(ttloss)
-                        test_df = pd.DataFrame(log_dict)                
-                        # test_df.to_hdf(f"{path}/test_df{df_fold_suffix}{emms_suffix}.h5", key="df", mode="w")
-                        test_metrics_dict = self.compute_metrics_df(test_df, task_type)
-                        test_metrics_df = pd.DataFrame(test_metrics_dict, index=[0])
-                        # test_metrics_df.to_csv(f"{path}/test_metrics{df_fold_suffix}{emms_suffix}.csv")
-                        if task_type == "Treatment_Response":
-                            test_confusion_matrix = accuracy_confusionMatrix_plot(log_dict, test_metrics_df)
-
-                        test_log = {
-                            # f'Test/Loss': ttloss,
-                            # f'Test/c-index': test_metrics_dict["c-index"],    
-                            } 
-                        for key, value in test_metrics_dict.items():
-                            test_log[f'Test{log_fold_string}/Missing_modalities_scenarios/{scenario}/{key}'] = value
-                        
-                        to_log.update(test_log) 
-                        if task_type == "Treatment_Response":
-                            plot_to_log = {
-                                # f"Train{log_fold_string}/Confusion_Matrix": wandb.Image(train_confusion_matrix),
-                            }
-                            # if eval_dataloader is not None:
-                            #     plot_to_log[f"Valid{log_fold_string}/Confusion_Matrix"] = wandb.Image(val_confusion_matrix)
-                            if test_dataloader is not None:
-                                plot_to_log[f"Test{log_fold_string}/Missing_modalities_scenarios/{scenario}/Confusion_Matrix"] = wandb.Image(test_confusion_matrix)
-                            to_log.update(plot_to_log) 
+                    scenarios += list(config.missing_modality_test.scenarios)
+                for scenario in scenarios:
+                    test_start = time.time()
+                    self.net.eval()
+                    log_dict, ttloss = self._run_eval(test_dataloader, task_type, device, debug=debug, scenario=scenario)
+                    testLoss.append(ttloss)
+                    test_metrics_dict = self.compute_metrics_df(pd.DataFrame(log_dict), task_type, per_dataset=False)
+                    key_prefix = f'Test{log_fold_string}' + (f'/Missing_modalities_scenarios/{scenario}' if scenario else '')
+                    if scenario is None:
+                        logging.info(f"Epoch {epoch + 1}/{self.config.trainer.epochs} test: " +
+                                     self._summary(test_metrics_dict, ttloss, time.time() - test_start, task_type))
+                    for key, value in test_metrics_dict.items():
+                        to_log[f'{key_prefix}/{key}'] = value
+                    if task_type == "Treatment_Response":
+                        test_confusion_matrix = accuracy_confusionMatrix_plot(log_dict, pd.DataFrame(test_metrics_dict, index=[0]))
+                        to_log[f"{key_prefix}/Confusion_Matrix"] = wandb.Image(test_confusion_matrix)
+                        if scenario is None:
+                            to_log[f"Train{log_fold_string}/Confusion_Matrix"] = wandb.Image(train_confusion_matrix)
+                            if eval_dataloader is not None:
+                                to_log[f"Valid{log_fold_string}/Confusion_Matrix"] = wandb.Image(val_confusion_matrix)
                                      
-            #to_log.update({"system/ram_gb": self.process.memory_info().rss / (1024**3)})       
             wandb.log(to_log)     
       
             if self.config.scheduler.batch_step==None or self.config.scheduler.batch_step==False:
@@ -726,16 +600,7 @@ class ModelManager():
                     wandb.run.summary["Highest_Metric/Epoch"] = highest_val_metric_monitor_epoch
                     for key, value in val_metrics_dict.items():
                         wandb.run.summary[f"Highest_Metric/Valid{log_fold_string}/{key}"] = value
-                        
-                    
-                    # train_df.to_hdf(f"{path}/best_train_df_highest_metric{df_fold_suffix}.h5", key="df", mode="w")
-                    # train_metrics_df.to_csv(f"{path}/best_train_metrics_highest_metric{df_fold_suffix}.csv")
 
-                    # val_df.to_hdf(f"{path}/best_val_df_highest_metric{df_fold_suffix}.h5", key="df", mode="w")
-                    # val_metrics_df.to_csv(f"{path}/best_val_metrics_highest_metric{df_fold_suffix}.csv")  
-
-                    # test_df.to_hdf(f"{path}/best_test_df_highest_metric{df_fold_suffix}.h5", key="df", mode="w")
-                    # test_metrics_df.to_csv(f"{path}/best_test_metrics_highest_metric{df_fold_suffix}.csv") 
 
                 if vloss < lowest_val_loss:
                     lowest_val_loss = vloss
@@ -743,26 +608,13 @@ class ModelManager():
                     lowest_val_loss_epoch = epoch + 1
                     logging.info(
                         f"############################################ New lowest_val_loss reached: {lowest_val_loss} #########################")
-                    # if kfold != "":
-                    #     checkpoint_splitted = checkpoint.split(".")
-                    #     checkpoint = f"{checkpoint_splitted[0]}{df_fold_suffix}.pt"
-                    # torch.save(self.net, checkpoint)
                     model_lowest_loss = copy.deepcopy(self.net)
                     model_lowest_loss.to('cpu')
                     wandb.run.summary["Lowest_Validation_Loss/Epoch"] = lowest_val_loss_epoch
-                    # wandb.run.summary["Lowest_Validation_Loss/Validation_Loss"] = lowest_val_loss
-                    # wandb.run.summary["Lowest_Validation_Loss/Validation_c-index"] = val_metrics_dict["c-index"],
                     for key, value in val_metrics_dict.items():
                         wandb.run.summary[f"Lowest_Validation_Loss/Valid{log_fold_string}/{key}"] = value
                     # # wandb.run.summary["Lowest_Validation_Loss/Validation_KM"] = val_metrics_dict["KM"],
-                    # train_df.to_hdf(f"{path}/best_train_df_lowest_loss{df_fold_suffix}.h5", key="df", mode="w")
-                    # train_metrics_df.to_csv(f"{path}/best_train_metrics_lowest_loss{df_fold_suffix}.csv")
 
-                    # val_df.to_hdf(f"{path}/best_val_df_lowest_loss{df_fold_suffix}.h5", key="df", mode="w")
-                    # val_metrics_df.to_csv(f"{path}/best_val_metrics_lowest_loss{df_fold_suffix}.csv")      
-
-                    # test_df.to_hdf(f"{path}/best_test_df_lowest_loss{df_fold_suffix}.h5", key="df", mode="w")
-                    # test_metrics_df.to_csv(f"{path}/best_test_metrics_lowest_loss{df_fold_suffix}.csv")    
 
                 elif patience_counter == self.config.trainer.patience:
                     logging.info(f"End of training phase - Patience threshold reached\nWeights Restored from Lowest val_loss epoch: {lowest_val_loss_epoch}\nlowest_val_loss: {lowest_val_loss}")
@@ -776,8 +628,8 @@ class ModelManager():
             if eval_dataloader is not None:
                 for checkpoint, model in zip([checkpoint_model_lowest_loss, checkpoint_model_highest_metric], [model_lowest_loss, model_highest_metric]):
                     if kfold != "":
-                        checkpoint_splitted = checkpoint.split(".")
-                        checkpoint = f"{checkpoint_splitted[0]}{df_fold_suffix}.pt"
+                        root, ext = os.path.splitext(checkpoint)
+                        checkpoint = f"{root}{df_fold_suffix}{ext}"
                     torch.save(model, checkpoint)
 
     def evaluate(self, test_dataloader, 
@@ -805,52 +657,23 @@ class ModelManager():
         # cudnn.benchmark = False
         logging.info("test")   
         df_fold_suffix = f"_{kfold}"
-        log_fold_string = f"/{kfold}"     
         models = []
         summary_paths = []
         
         if best:
             if kfold != "":
-                checkpoint_splitted_last = checkpoint_last_epoch.split(".")
-                root, ext = os.path.splitext(checkpoint_last_epoch)
-                if not root.endswith(df_fold_suffix):
-                    checkpoint_last_epoch = f"{root}{df_fold_suffix}{ext}"
-                else:
-                    checkpoint_last_epoch = f"{root}{ext}"
-
-                checkpoint_splitted_lowest_l = checkpoint_model_lowest_loss.split(".")
-                root, ext = os.path.splitext(checkpoint_model_lowest_loss)
-                if not root.endswith(df_fold_suffix):
-                    checkpoint_model_lowest_loss = f"{root}{df_fold_suffix}{ext}"
-                else:
-                    checkpoint_model_lowest_loss = f"{root}{ext}"
-                
-                
-                checkpoint_model_lowest_loss = f"{root}{df_fold_suffix}{ext}"
-
-                checkpoint_splitted_highest_m = checkpoint_model_highest_metric.split(".")
-                
-                root, ext = os.path.splitext(checkpoint_model_highest_metric)
-                if not root.endswith(df_fold_suffix):
-                    checkpoint_model_highest_metric = f"{root}{df_fold_suffix}{ext}"
-                else:
-                    checkpoint_model_highest_metric = f"{root}{ext}"
+                checkpoint_last_epoch = self._fold_checkpoint(checkpoint_last_epoch, kfold)
+                checkpoint_model_lowest_loss = self._fold_checkpoint(checkpoint_model_lowest_loss, kfold)
+                checkpoint_model_highest_metric = self._fold_checkpoint(checkpoint_model_highest_metric, kfold)
+            # the lowest-loss / highest-metric models exist only when training had a validation set:
+            # without it they would be copies of the last epoch model, evaluated three times
             if os.path.exists(checkpoint_model_lowest_loss):
-                model_lowest_l = torch.load(checkpoint_model_lowest_loss, weights_only=False)
-            else:
-                model_lowest_l = torch.load(checkpoint_last_epoch, weights_only=False)
-            models.append(model_lowest_l)
-            summary_paths.append('Lowest_Validation_Loss_Model/Test')
-            
+                models.append(torch.load(checkpoint_model_lowest_loss, weights_only=False))
+                summary_paths.append('Lowest_Validation_Loss_Model/Test')
             if os.path.exists(checkpoint_model_highest_metric):
-                model_highest_m = torch.load(checkpoint_model_highest_metric, weights_only=False)
-            else:
-                model_highest_m = torch.load(checkpoint_last_epoch, weights_only=False)
-            # model_highest_m = torch.load(checkpoint_model_highest_metric, weights_only=False)
-            
-            models.append(model_highest_m)
-            summary_paths.append('Highest_Validation_Metric_Model/Test')
-                
+                models.append(torch.load(checkpoint_model_highest_metric, weights_only=False))
+                summary_paths.append('Highest_Validation_Metric_Model/Test')
+
             last_model = torch.load(checkpoint_last_epoch, weights_only=False)
             logging.info("\n Evaluate best model")
         else:
@@ -868,57 +691,40 @@ class ModelManager():
         for model, summary_path in zip(models, summary_paths):
             model = model.to(device)
             model.eval()
-            tloss = []
-            tlossWeights = []
-            with torch.inference_mode():
-                for idx, batch  in enumerate(test_dataloader):
-                    if idx == 0:
-                            log_dict = self.initialize_metrics_dict(task_type)
-                    # batch_data = torch.squeeze(batch_data, 0)
-                    step_result = self.step(batch, log_dict, task_type, device, model, eval_missing_modality_scenario, is_eval=True)
-                    # step_result = self.step(batch, log_dict, task_type, device, model)
-                    if Save_XA_attention_files:
-                        self.save_XA_attentions(batch, step_result, path, partition="test", epoch="best" if best else "last")
-                    
-                    outputs = step_result['outputs'] 
-                    labels = step_result['labels'] 
-                    censorships = step_result['censorships'] 
-                    log_dict = step_result['log_dict']
-                    pd.DataFrame(log_dict).to_csv(f"{path}/test_df_{df_fold_suffix}_{summary_path.split('/')[0]}.csv", index=False)
-                    print(f'Results saved in csv file: {path}/test_df_{df_fold_suffix}_{summary_path.split("/")[0]}.csv')
-                    if task_type == "Survival":
-                        loss = self.loss_function(outputs, labels, None, censorships)
-                    elif task_type == "Treatment_Response":
-                        loss = self.loss_function(outputs, labels.squeeze(1))
-                    else:
-                        raise Exception(f"{task_type} is not supported!")
-
-                    if self.config.data_loader.batch_size <= self.config.data_loader.real_batch_size:
-                        tloss.append(loss.item())
-                    else:
-                        tloss.append(loss.detach().mean().item())
-                    tlossWeights.append(batch["label"].size(dim=0))
-
-            tloss = np.array(tloss)
-            tloss = np.average(tloss, weights=tlossWeights)
+            save_attentions = (lambda batch, step_result: self.save_XA_attentions(
+                batch, step_result, path, partition="test", epoch="best" if best else "last")) if Save_XA_attention_files else None
+            log_dict, tloss = self._run_eval(test_dataloader, task_type, device, model=model,
+                                             scenario=eval_missing_modality_scenario, on_batch=save_attentions)
             test_df = pd.DataFrame(log_dict)
-            # test_df.to_csv(f"{path}/test_df_{df_fold_suffix}.csv", index=False)
+            test_df_path = f"{path}/test_df_{df_fold_suffix}_{summary_path.split('/')[0]}.csv"
+            test_df.to_csv(test_df_path, index=False)
+            print(f'Results saved in csv file: {test_df_path}')
             
             test_metrics_dict = self.compute_metrics_df(test_df, task_type)
+            if task_type == "Survival":
+                test_metrics_dict["n_patients"] = len(test_df)
+                test_metrics_dict["n_events"] = int((test_df["all_censorships"] == 0).sum())
+            logging.info(self._fold_summary(kfold, summary_path.split("/")[0], scenario, test_metrics_dict, task_type))
+            if task_type == "Survival":
+                self._km_plot(test_df["all_original_event_times"], 1 - test_df["all_censorships"], test_df["all_risk_scores"],
+                              path, summary_path.split("/")[0], scenario, kfold or "test")
 
             self.results_store.add_result(
                 scenario=scenario,
                 model_version=summary_path.split("/")[0],
                 fold_result=test_metrics_dict,
-                fold_num=int(kfold.split('_')[1]) if kfold else 0
+                fold_num=int(kfold.split('_')[1]) if kfold else 0,
+                predictions=test_df[["patient_ids", "dataset_name", "all_risk_scores", "all_censorships", "all_original_event_times"]]
+                            if task_type == "Survival" else None,
             )
 
-            for key, value in test_metrics_dict.items():
-                wandb.run.summary[f"{summary_path}{log_fold_string}/{key}"] = value
+            # per-fold results go to the results/folds table at the end of the k-fold (see _log_aggregated_metrics)
 
         model_name = model.__class__.__name__ 
 
         if log_aggregated:
+            # optional block: configs without missing_modalities_tables must not crash here
+            modality_setting = self.config.data_loader.get('missing_modalities_tables', {}).get('missing_mod_rate')
             test_scenario = scenario
             aggregated_metrics = self.results_store.compute_aggregated_metrics(test_scenario, task_type)
             self._log_aggregated_metrics(aggregated_metrics, test_scenario, task_type)
@@ -975,7 +781,7 @@ class ModelManager():
                 if is_demo_test:
                     csv_path = csv_path.replace(".csv", "_demo_test.csv")
                 if not os.path.exists(csv_path):
-                    columns += ["c-index_mean", "c-index_std", "c-index_list"]
+                    columns += ["c-index_mean", "c-index_std", "c-index_list", "c-index_pooled"]
                     df_old_records = pd.DataFrame(columns=columns)
                 else:
                     df_old_records = pd.read_csv(csv_path)
@@ -1002,6 +808,7 @@ class ModelManager():
                         telegram_message += f"*Mean C-index*: {current_c_index_mean:.3f} -> {position}° best run"
                         asyncio.run(send_telegram_message(telegram_message))
             
+            new_rows = []
             for model_version, metrics in aggregated_metrics.items():
                 new_row = {
                     "ID": wandb.run.id,
@@ -1011,8 +818,8 @@ class ModelManager():
                     "End Time": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
                     "seed": self.config.seed,
                     "internal_val_size": self.config.data_loader.KFold.internal_val_size,
-                    'modality_setting': self.config.data_loader.missing_modalities_tables.missing_mod_rate,
-                    'test_scenario': eval_missing_modality_scenario if eval_missing_modality_scenario else self.config.data_loader.missing_modalities_tables.missing_mod_rate,
+                    'modality_setting': modality_setting,
+                    'test_scenario': eval_missing_modality_scenario if eval_missing_modality_scenario else modality_setting,
                 }
                 
                 if task_type == "Treatment_Response":
@@ -1038,12 +845,6 @@ class ModelManager():
                     new_row['use_layernorm'] = self.config.model.kwargs.use_layernorm
                     new_row['dropout'] = self.config.model.kwargs.dropout
 
-                    
-                # else:
-                #     # per ogni valore in kwargs, lo aggiungo
-                #     for key, value in self.config.model.kwargs.items():
-                #         if key not in ["input_modalities"]:
-                #             new_row[key] = value
 
                 if task_type == "Treatment_Response":
                     task_metrics = ["AUC", "F1-Score", "Accuracy"] 
@@ -1054,8 +855,16 @@ class ModelManager():
                     for suffix in ["_mean", "_std", "_list"]:
                         key = metric+suffix
                         new_row[key] = np.round(metrics[key], 3).tolist()
-                df_old_records = pd.concat([df_old_records, pd.DataFrame([new_row])], ignore_index=True)
-            df_old_records.to_csv(csv_path, index=False)
+                if task_type == "Survival":
+                    # c-index of the out-of-fold predictions of all folds together, overall and per dataset
+                    for key, value in metrics.items():
+                        if key.endswith("c-index_pooled"):
+                            new_row[key] = np.round(value, 3)
+                    for key in ["n_patients", "n_events"]:  # test patients / events over all folds
+                        if key in metrics:
+                            new_row[key] = metrics[key]
+                new_rows.append(new_row)
+            df_old_records = self._append_results_rows(csv_path, new_rows, columns)
                     
 
             if print_demo_results:
@@ -1084,19 +893,105 @@ class ModelManager():
             
             '''
 
+    @staticmethod
+    def _append_results_rows(csv_path, new_rows, columns):
+        """Appends the rows of this run to the shared results CSV under an exclusive file lock: runs that
+        finish together (e.g. parallel SLURM jobs) would otherwise read the same file and overwrite each
+        other's rows. The file is re-read inside the lock, so rows written meanwhile are kept."""
+        import fcntl
+        os.makedirs(os.path.dirname(csv_path), exist_ok=True)
+        with open(csv_path + ".lock", "w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            try:
+                new = pd.DataFrame(new_rows)
+                if os.path.exists(csv_path):
+                    records = pd.concat([pd.read_csv(csv_path), new], ignore_index=True)
+                else:  # new file: the usual column order first
+                    records = new[[c for c in columns if c in new] + [c for c in new if c not in columns]]
+                records.to_csv(csv_path, index=False)
+            finally:
+                fcntl.flock(lock, fcntl.LOCK_UN)
+        return records
+
+    MODEL_VERSION_TAGS = {"Last_Epoch_Model": "last_epoch", "Lowest_Validation_Loss_Model": "lowest_val_loss",
+                          "Highest_Validation_Metric_Model": "highest_val_metric"}
+
+    def _km_plot(self, times_days, events, risks, path, model_version, scenario, name, folds=None):
+        """Kaplan-Meier plot of the high / low risk test patients: saved in the run folder and logged to wandb."""
+        tag = self.MODEL_VERSION_TAGS.get(model_version, model_version)
+        scenario_part = "" if scenario == "base" else f"/{scenario}"
+        title = f"{'+'.join(self.config.model.kwargs.input_modalities)} | {tag}{scenario_part} | {name}"
+        try:
+            fig, p_value = km_risk_groups_plot(times_days, events, risks, title, folds=folds)
+        except Exception as e:  # a plot must never stop the run
+            logging.warning(f"KM plot {name} failed: {e}")
+            return np.nan
+        file_name = f"km_{tag}{scenario_part.replace('/', '_')}_{name}.png"
+        fig.savefig(os.path.join(path, file_name))
+        wandb.log({f"results{scenario_part}/km/{tag}/{name}": wandb.Image(fig)})
+        plt.close(fig)
+        return p_value
+
+    def _fold_summary(self, kfold, model_version, scenario, metrics, task_type):
+        """One log line with the test results of a fold."""
+        main = "c-index" if task_type == "Survival" else "AUC"
+        # overall only: the per-dataset results are in the final tables
+        line = f"{kfold or 'Test'} [{self.MODEL_VERSION_TAGS.get(model_version, model_version)}" + \
+               (f", {scenario}" if scenario != "base" else "") + f"] test: {main} {metrics[main]:.3f}"
+        if "n_patients" in metrics:
+            line += f" | {metrics['n_patients']} patients, {metrics['n_events']} events"
+        return line
+
     def _log_aggregated_metrics(self, aggregated_metrics, scenario, task_type):
-        """Log aggregated metrics for a specific scenario"""
+        """End of the k-fold: results table in the log, a few results/* keys in the wandb run summary
+        (one value per run: easy to compare runs in the wandb runs table) and the per-fold table."""
+        prefix = "results" if scenario == "base" else f"results/{scenario}"
+        rows, dataset_blocks = [], []
         for model_version, metrics in aggregated_metrics.items():
-            path_prefix = f"{model_version}/Aggregated"
-            if scenario != "base":
-                path_prefix += f"/Missing_modalities_scenarios/{scenario}"
-                
-            to_log = {}
+            tag = self.MODEL_VERSION_TAGS.get(model_version, model_version)
             for key, value in metrics.items():
-                if key not in ["model_version", "Confusion_Matrix"]:
-                    to_log[f"{path_prefix}/{key}"] = value
-                    
+                # run summary: overall values only (per-dataset values go to the per_dataset table)
+                per_dataset_key = key.endswith("_c-index_pooled")
+                if key != "model_version" and np.isscalar(value) and not per_dataset_key:
+                    wandb.run.summary[f"{prefix}/{tag}/{key}"] = value
+            per_dataset = self.results_store.per_dataset_table(scenario, model_version)
+            if per_dataset["dataset"].nunique() > 1 if len(per_dataset) else False:
+                wandb.log({f"{prefix}/{tag}/per_dataset": wandb.Table(dataframe=per_dataset)})
+                pooled = per_dataset[per_dataset["fold"] == "pooled"].set_index("dataset")
+                by_fold = per_dataset[per_dataset["fold"] != "pooled"].groupby("dataset")["c-index"]
+                block = pd.DataFrame({"patients": pooled["patients"], "events": pooled["events"],
+                                      "c-index (mean ± std)": [f"{m:.3f} ± {s:.3f}" for m, s in zip(by_fold.mean(), by_fold.std(ddof=0))],
+                                      "pooled": pooled["c-index"].map(lambda v: f"{v:.3f}")})
+                dataset_blocks.append((tag, block.reset_index()))
             if "Confusion_Matrix" in metrics:
-                to_log[f"{path_prefix}/Confusion_Matrix"] = wandb.Image(metrics["Confusion_Matrix"])
-                
-            wandb.log(to_log)
+                wandb.log({f"{prefix}/{tag}/Confusion_Matrix": wandb.Image(metrics["Confusion_Matrix"])})
+            if task_type == "Survival" and self.results_store.predictions[scenario][model_version]:
+                oof = pd.concat(self.results_store.predictions[scenario][model_version], ignore_index=True)
+                p_value = self._km_plot(oof["all_original_event_times"], 1 - oof["all_censorships"], oof["all_risk_scores"],
+                                        self.config.parent_directory, model_version, scenario, "aggregated", folds=oof["fold"])
+                metrics["km_logrank_p_pooled"] = p_value
+                wandb.run.summary[f"{prefix}/{tag}/km_logrank_p_pooled"] = p_value
+            row = {"model": tag}
+            if task_type == "Survival":
+                row["c-index (mean ± std)"] = f"{metrics['c-index_mean']:.3f} ± {metrics['c-index_std']:.3f}"
+                if "c-index_pooled" in metrics:
+                    row["pooled"] = f"{metrics['c-index_pooled']:.3f}"
+                row["per fold"] = " ".join(f"{c:.3f}" for c in metrics["c-index_list"])
+                if "n_patients" in metrics:
+                    row["patients"], row["events"] = metrics["n_patients"], metrics["n_events"]
+                if "km_logrank_p_pooled" in metrics:
+                    row["KM log-rank p"] = f"{metrics['km_logrank_p_pooled']:.2e}"
+            else:
+                for m in ["AUC", "F1-Score", "Accuracy"]:
+                    row[m] = f"{metrics[f'{m}_mean']:.3f} ± {metrics[f'{m}_std']:.3f}"
+            rows.append(row)
+        folds = self.results_store.fold_table(scenario)
+        if len(folds):
+            wandb.log({f"{prefix}/folds": wandb.Table(dataframe=folds)})
+        header = f"RESULTS {self.net.__class__.__name__} | {self.get_dataset_name()} | " \
+                 f"{'+'.join(self.config.model.kwargs.input_modalities)}" + (f" | scenario {scenario}" if scenario != "base" else "")
+        table = pd.DataFrame(rows).to_string(index=False)
+        for tag, block in dataset_blocks:
+            table += f"\n\nper dataset ({tag}):\n" + block.to_string(index=False)
+        width = max(len(header), max(len(l) for l in table.splitlines()))
+        logging.info("\n" + "=" * width + f"\n{header}\n" + "-" * width + f"\n{table}\n" + "=" * width)

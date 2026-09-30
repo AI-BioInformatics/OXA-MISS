@@ -2,14 +2,62 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
-import io, torch, os
+import io, torch
 from PIL import Image
 from lifelines import KaplanMeierFitter
 from lifelines.statistics import logrank_test
 from sklearn.metrics import confusion_matrix
-from sklearn.metrics import roc_auc_score, confusion_matrix,f1_score
 from sksurv.metrics import concordance_index_censored
 from collections import defaultdict
+import logging
+
+
+def km_risk_groups_plot(times_days, events, risks, title, folds=None):
+    """Kaplan-Meier curves of the high / low risk patients (split at the median risk; with folds, at the
+    median of each fold, since every fold has its own model and risk scale), log-rank test p-value and
+    numbers at risk. Returns (figure, p-value)."""
+    from lifelines.plotting import add_at_risk_counts
+    df = pd.DataFrame({"years": np.asarray(times_days, dtype=float) / 365.25,
+                       "event": np.asarray(events, dtype=int), "risk": np.asarray(risks, dtype=float),
+                       "fold": 0 if folds is None else np.asarray(folds)})
+    df["group"] = df.groupby("fold")["risk"].transform(lambda r: np.where(r > r.median(), "High risk", "Low risk"))
+    fig, ax = plt.subplots(figsize=(7, 5.5), dpi=120)
+    fitters, legend = [], []
+    for group, color in [("Low risk", "#364C83"), ("High risk", "#C1423A")]:
+        g = df[df.group == group]
+        if len(g) == 0:
+            continue
+        legend.append(f"{group} (n={len(g)}, events={int(g.event.sum())})")
+        kmf = KaplanMeierFitter(label=group)  # short label: it is also the row name of the at-risk table
+        kmf.fit(g.years, event_observed=g.event)
+        kmf.plot_survival_function(ax=ax, color=color, ci_alpha=0.12, linewidth=2, show_censors=True,
+                                   censor_styles={"ms": 5, "marker": "|"})
+        fitters.append(kmf)
+    p_value = np.nan
+    low, high = df[df.group == "Low risk"], df[df.group == "High risk"]
+    if len(low) and len(high) and df.event.any():
+        p_value = logrank_test(low.years, high.years, event_observed_A=low.event, event_observed_B=high.event).p_value
+    ax.set_title(f"{title}\nlog-rank p = {p_value:.2e}" if not np.isnan(p_value) else title, fontsize=10)
+    ax.set_xlabel("Time (years)")
+    ax.set_ylabel("Overall survival probability")
+    ax.set_ylim(0, 1.05)
+    ax.grid(alpha=0.3)
+    handles = [line for line in ax.get_lines() if not line.get_label().startswith("_")][:len(legend)]
+    if handles:
+        ax.legend(handles, legend, loc="lower left", fontsize=9)
+    if fitters:
+        add_at_risk_counts(*fitters, ax=ax, rows_to_show=["At risk"])
+    fig.tight_layout()
+    return fig, p_value
+
+
+def safe_c_index(censorships, event_times, risk_scores):
+    """c-index, NaN when it is undefined (fewer than 2 patients or no events) instead of raising."""
+    events = (1 - np.asarray(censorships)).astype(bool)
+    if len(events) < 2 or not events.any():
+        logging.warning(f"c-index undefined ({len(events)} patients, {int(events.sum())} events): set to NaN")
+        return np.nan
+    return concordance_index_censored(events, np.asarray(event_times), np.asarray(risk_scores), tied_tol=1e-08)[0]
 
 import importlib.util
 import sys
@@ -49,21 +97,7 @@ def import_class_from_path(import_path, model_name, **kwargs):
                 raise ImportError(f"Impossibile importare il modulo da {import_path}")
             return ModelClass#(**kwargs)
         except (ModuleNotFoundError, AttributeError) as e:
-            raise ValueError(f"Error importing {model_name} class from {import_path}")
-
-
-# def import_class_from_path(import_path, class_name):
-#     import_path = Path(import_path).resolve()  # Risolve il percorso assoluto
-#     module_name = import_path.stem  # Ottiene il nome del modulo dal file
-
-#     spec = importlib.util.spec_from_file_location(module_name, str(import_path))
-#     if spec and spec.loader:
-#         module = importlib.util.module_from_spec(spec)
-#         sys.modules[module_name] = module
-#         spec.loader.exec_module(module)
-#         return getattr(module, class_name)  # Restituisce la classe
-#     else:
-#         raise ImportError(f"Impossibile importare il modulo da {import_path}")
+            raise ValueError(f"Error importing {model_name} class from {import_path}") from e
 
 
 def KaplanMeier_plot(log_dict):
@@ -165,14 +199,61 @@ class ResultsStore:
     def __init__(self):
         # Structure: {scenario: {model_version: [fold_results]}}
         self.results = defaultdict(lambda: defaultdict(list))
+        # out-of-fold test predictions, to compute one c-index over the test patients of all folds
+        self.predictions = defaultdict(lambda: defaultdict(list))
         self.current_fold = 0
         
-    def add_result(self, scenario, model_version, fold_result, fold_num=None):
-        """Store results for a single fold"""
+    def add_result(self, scenario, model_version, fold_result, fold_num=None, predictions=None):
+        """Store results for a single fold (predictions: test DataFrame with all_risk_scores,
+        all_censorships, all_original_event_times (days), dataset_name)"""
         if fold_num is not None:
             self.current_fold = fold_num
-        self.results[scenario][model_version].append(fold_result)
+        self.results[scenario][model_version].append({**fold_result, "fold": self.current_fold})
+        if predictions is not None:
+            self.predictions[scenario][model_version].append(predictions.assign(fold=self.current_fold))
+
+    def pooled_c_index(self, scenario, model_version):
+        """c-index of the out-of-fold predictions of all folds together (every patient is in one test fold):
+        more reliable than the mean over folds when a subset has few events per fold (e.g. MRI patients),
+        also per dataset. Risks of different folds come from different models."""
+        folds = self.predictions[scenario][model_version]
+        if not folds:
+            return {}
+        df = pd.concat(folds, ignore_index=True)
+        pooled = {"c-index_pooled": safe_c_index(df["all_censorships"], df["all_original_event_times"], df["all_risk_scores"])}
+        if df["dataset_name"].nunique() > 1:
+            for dataset, d in df.groupby("dataset_name"):
+                pooled[f"{dataset}_c-index_pooled"] = safe_c_index(d["all_censorships"], d["all_original_event_times"], d["all_risk_scores"])
+        return pooled
         
+    def fold_table(self, scenario):
+        """One row per (model version, fold) with the overall scalar test metrics of that fold
+        (the <dataset>_* metrics are left out: they are in per_dataset_table)."""
+        datasets = {d for folds in self.predictions[scenario].values() for p in folds for d in p["dataset_name"].unique()}
+        rows = []
+        for model_version, fold_results in self.results[scenario].items():
+            for r in fold_results:
+                row = {"model_version": model_version, "fold": r.get("fold")}
+                row.update({k: v for k, v in r.items() if k != "fold" and np.isscalar(v)
+                            and not any(k.startswith(f"{d}_") for d in datasets)})
+                rows.append(row)
+        return pd.DataFrame(rows)
+
+    def per_dataset_table(self, scenario, model_version):
+        """Long table, one row per (dataset, fold) plus one 'pooled' row per dataset, from the out-of-fold
+        test predictions: patients, events, c-index. Stays compact with many datasets (pan-cancer)."""
+        folds = self.predictions[scenario][model_version]
+        if not folds:
+            return pd.DataFrame()
+        df = pd.concat(folds, ignore_index=True)
+        rows = []
+        for dataset, d in df.groupby("dataset_name"):
+            for fold, g in list(d.groupby("fold")) + [("pooled", d)]:
+                rows.append({"dataset": dataset, "fold": str(fold), "patients": len(g),
+                             "events": int((g["all_censorships"] == 0).sum()),
+                             "c-index": safe_c_index(g["all_censorships"], g["all_original_event_times"], g["all_risk_scores"])})
+        return pd.DataFrame(rows)
+
     def compute_aggregated_metrics(self, scenario, task_type="Survival"):
         """Calculate aggregated metrics for all model versions in a scenario"""
         aggregated = {}
@@ -181,10 +262,14 @@ class ResultsStore:
             if task_type == "Survival":
                 c_indices = [r["c-index"] for r in fold_results]
                 metrics = {
-                    "c-index_mean": np.mean(c_indices),
-                    "c-index_std": np.std(c_indices),
-                    "c-index_list": c_indices
+                    "c-index_mean": np.nanmean(c_indices),  # nan: fold without events
+                    "c-index_std": np.nanstd(c_indices),
+                    "c-index_list": c_indices,
+                    **self.pooled_c_index(scenario, model_version),
                 }
+                if all("n_patients" in r for r in fold_results):
+                    metrics["n_patients"] = int(sum(r["n_patients"] for r in fold_results))
+                    metrics["n_events"] = int(sum(r["n_events"] for r in fold_results))
             
             elif task_type == "Treatment_Response":
                 aucs = [r["AUC"] for r in fold_results]
@@ -214,107 +299,3 @@ class ResultsStore:
             aggregated[model_version] = metrics
             
         return aggregated
-
-def kfold_results_merge(result_id_path, prefix='last_epoch_test_df_Fold_', task_type='Survival'):
-    
-    folder = result_id_path
-    paths = [
-        os.path.join(result_id_path,f)
-        for f in sorted(os.listdir(folder))
-        if os.path.isfile(os.path.join(folder, f)) and f.startswith(prefix)
-    ]
-
-    dfs = [pd.read_hdf(path).set_index('patient_ids') for path in paths]
-
-    is_loo_case = False
-    if len(dfs):
-        is_loo_case = len(dfs[0]) == 1
-    
-    df_tot = pd.concat(dfs)
-
-    def survival_results_merge(df):
-        all_risk_scores = df["all_risk_scores"].values
-        all_censorships = df["all_censorships"].values
-        all_event_times = df["all_event_times"].values
-        c_index = concordance_index_censored((1-all_censorships).astype(bool), all_event_times, all_risk_scores, tied_tol=1e-08)[0] 
-        return {"c-index": round(c_index, 3)}
-    
-    def treatment_response_results_merge(df):
-        all_labels = df["all_labels"].values
-        all_predictions = df["treatment_response_predictions"].values
-        all_logits = torch.tensor(df["treatment_response_logits"].tolist())
-        
-        logits_for_auc = torch.softmax(all_logits, dim=1).numpy()[:, 1]
-        auc = roc_auc_score(all_labels, logits_for_auc)    
-        f1 = f1_score(all_labels, all_predictions, average='macro')
-        accuracy = np.mean(all_labels == all_predictions) 
-  
-        out = {
-            "AUC" : auc,
-            "Accuracy" : accuracy,
-            "F1-Score" : f1
-        }
-    
-        if not is_loo_case:
-            metrics_df = pd.DataFrame({"AUC": [auc], "F1-Score": [f1], "Accuracy": [accuracy]})
-            log_dict = {"all_labels": all_labels, "treatment_response_predictions": all_predictions}
-            image =  accuracy_confusionMatrix_plot(log_dict, metrics_df)
-            out["Confusion_Matrix"] = image
-        return out
-    
-    results_merge_function_dict = {
-        'Survival': survival_results_merge,
-        'Treatment_Response': treatment_response_results_merge
-    }
-    
-    results_merge_function = results_merge_function_dict[task_type]
-    
-    out = results_merge_function(df_tot)
-    if len(dfs) > 1:
-
-        folds_out = {}
-        for key in out: folds_out[key] = []
-        for df_fold in dfs:
-            fold_out = results_merge_function(df_fold)
-            for key in fold_out:
-                folds_out[key].append(fold_out[key])
-
-        std_out = {}
-        mean_out = {}
-        list_out = {}
-        for key in out:
-            if isinstance(out[key], int) or isinstance(out[key], float):
-                std_out[f'{key}_std'] = np.std(folds_out[key])
-                mean_out[f'{key}_mean'] = np.mean(folds_out[key])
-                list_out[f'{key}_list'] = folds_out[key]
-        out.update(std_out)
-        out.update(mean_out)
-        out.update(list_out)
-
-    return out
-
-def predTime_vs_actualTime_confusionMatrix_plot(self, log_dict):
-    patient_ids = log_dict["patient_ids"]
-    all_risk_scores = np.array(log_dict["all_risk_scores"])
-    all_censorships = np.array(log_dict["all_censorships"])
-    all_event_times = np.array(log_dict["all_event_times"])
-    
-    # Calculate the predicted labels based on risk scores
-    predicted_labels = np.where(all_risk_scores > 0.5, 1, 0)
-    
-    # Create the confusion matrix
-    confusion_matrix = np.zeros((2, 2))
-    for i in range(len(patient_ids)):
-        true_label = all_censorships[i]
-        predicted_label = predicted_labels[i]
-        confusion_matrix[true_label][predicted_label] += 1
-    
-    # Plot the confusion matrix
-    plt.imshow(confusion_matrix, cmap='Blues')
-    plt.title('Confusion Matrix')
-    plt.xlabel('Predicted Label')
-    plt.ylabel('True Label')
-    plt.xticks([0, 1], ['Negative', 'Positive'])
-    plt.yticks([0, 1], ['Negative', 'Positive'])
-    plt.colorbar()
-    plt.show()   

@@ -1,7 +1,6 @@
-from torch.utils.data import Dataset, DataLoader, Subset
+from torch.utils.data import DataLoader, Subset
 from torch import Generator
 import numpy as np
-import pandas as pd
 
 def extract_names(f):
     """Function that extracts from the sample name:
@@ -42,71 +41,44 @@ def extract_names(f):
     return sample, tissue, treatment_phase, side
 
 
+def report_patients_not_in_dataset(partition, requested, kept, n_show=5):
+    """Split patients dropped because they are not in the dataset (e.g. none of the input modalities)."""
+    missing = sorted(set(requested) - set(kept))
+    if missing:
+        print(f"{len(missing)}/{len(requested)} {partition} patients of the split are not in the dataset "
+              f"(no label or none of the input modalities), e.g. {missing[:n_show]}")
+
+
 def get_dataloaders(dataset, train_patients, val_patients, test_patients, config):
-    prefetch_factor = 4
-    if config.data_loader.num_workers == 0:
-        prefetch_factor = None
-    
-    if train_patients is not None:
-        mask = np.isin(train_patients, dataset.patient_df.index)
-        # Filter the array to keep only elements in df.index
-        filtered_train_patients = train_patients[mask]
-        if len(filtered_train_patients) != len(train_patients):
-            print("Some train patients are not in the dataset: ", set(train_patients) - set(filtered_train_patients))
-        
-        g = Generator()
-        g.manual_seed(42)
-        train_dataloader = DataLoader(
-                                    Subset(dataset, filtered_train_patients), 
-                                    batch_size=config.data_loader.batch_size, 
-                                    shuffle=True, 
-                                    generator=g,
-                                    drop_last=True, 
-                                    pin_memory=True, 
-                                    num_workers=config.data_loader.num_workers, 
-                                    prefetch_factor=prefetch_factor,
-                                    persistent_workers=True
-                                )
-    else:
-        train_dataloader = None
-    if val_patients is not None:
-        mask = np.isin(val_patients, dataset.patient_df.index)
-        filtered_val_patients = val_patients[mask]
-        if len(filtered_val_patients) != len(val_patients):
-            print("Some val patients are not in the dataset: ", set(val_patients) - set(filtered_val_patients))
-        batch_size = config.data_loader.batch_size
-        if config.data_loader.test_sample == False:
-            batch_size = 1
-        val_dataloader = DataLoader(
-                                        Subset(dataset, filtered_val_patients), 
-                                        batch_size=batch_size,
-                                        shuffle=False, 
-                                        drop_last=False, 
-                                        pin_memory=True, 
-                                        num_workers=config.data_loader.num_workers, 
-                                        prefetch_factor=prefetch_factor,
-                                        persistent_workers=True
-                                )
-    else:
-        val_dataloader = None   
-    if test_patients is not None:
-        mask = np.isin(test_patients, dataset.patient_df.index)
-        filtered_test_patients = test_patients[mask]
-        if len(filtered_test_patients) != len(test_patients):
-            print("Some test patients are not in the dataset: ", set(test_patients) - set(filtered_test_patients))
-        batch_size = config.data_loader.batch_size
-        if config.data_loader.test_sample == False:
-            batch_size = 1
-        test_dataloader = DataLoader(
-                                        Subset(dataset, filtered_test_patients), 
-                                        batch_size=batch_size, 
-                                        shuffle=False, 
-                                        drop_last=False, 
-                                        pin_memory=True, 
-                                        num_workers=config.data_loader.num_workers, 
-                                        prefetch_factor=prefetch_factor,
-                                        persistent_workers=True
-                                    )
-    else:
-        test_dataloader = None
-    return train_dataloader, val_dataloader, test_dataloader
+    """DataLoaders of the given patients (None -> no loader); patients not in the dataset are left out.
+    Training: shuffled (fixed seed), full batches only. Validation / test: in order, batch of one patient
+    when test_sample is False (all patches of a patient, variable size)."""
+    # all the loaders below use batches of one patient only when batch_size == 1; OXA_MISS never reads
+    # patch_features of a missing WSI (other models are not checked, they keep the full-size zeros)
+    dataset.compact_missing_wsi = config.data_loader.batch_size == 1 and dataset.model_name == 'OXA_MISS'
+    num_workers = config.data_loader.num_workers
+    eval_batch_size = 1 if config.data_loader.test_sample == False else config.data_loader.batch_size
+
+    def make_loader(partition, patients, train):
+        if patients is None:
+            return None
+        patients = patients[np.isin(patients, dataset.patient_df.index)]
+        report_patients_not_in_dataset(partition, requested_patients[partition], patients)
+        generator = None
+        if train:
+            generator = Generator()
+            generator.manual_seed(42)
+        return DataLoader(Subset(dataset, patients),
+                          batch_size=config.data_loader.batch_size if train else eval_batch_size,
+                          shuffle=train,
+                          generator=generator,
+                          drop_last=train,
+                          pin_memory=True,
+                          num_workers=num_workers,
+                          prefetch_factor=4 if num_workers > 0 else None,
+                          persistent_workers=num_workers > 0)
+
+    requested_patients = {"train": train_patients, "val": val_patients, "test": test_patients}
+    return (make_loader("train", train_patients, train=True),
+            make_loader("val", val_patients, train=False),
+            make_loader("test", test_patients, train=False))

@@ -2,8 +2,9 @@
 Build updated OS label files that include every patient with an OS label and at least
 one available modality (WSI, genomics, CT, MRI, clinical), not only patients with a WSI.
 
-Existing rows of the label files are kept unchanged (CPTAC: patients with a known non-ccRCC
-histology are removed). New patients are appended with:
+Existing rows of the label files are kept unchanged, except: CPTAC patients with a known non-ccRCC
+histology are removed; patients with follow-up <= 0 days get the OS found in another source
+(OS_OVERRIDES) or are removed. New patients are appended with:
   - one row per WSI found on disk (union of all feature extractors), or
   - a single row with an empty slide_id when the patient has no WSI.
 
@@ -47,6 +48,32 @@ TCGA_COHORTS = {
 CPTAC_MORPHOLOGY_KEEP = {'8312/3', 'Unknown'}
 
 LABEL_COLS = ['case_id', 'slide_id', 'True_Label', 'FUT', 'Survival']
+
+# Patients whose follow-up in the label files is <= 0 days but a usable time was found in another source
+# (search of 2026-09-30 over local tables, GDC API release 46, cBioPortal API, PDC API, LinkedOmics and the
+#  CPTAC ccRCC papers: dataloader/dataset_updated/audit/patients_without_valid_OS.csv). case_id -> (event, days, source)
+# Rule agreed with the user: alive patients are censored at the latest date they were known alive;
+# dead patients without a death date stay dead, with the latest date they were known alive as FUT.
+OS_OVERRIDES = {
+    # alive: censored at the latest date known alive
+    'TCGA-BH-A0B2': (0, 1242, 'cBioPortal brca_tcga_pan_can_atlas_2018: LIVING, 40.81 months (label said Dead at 0, '
+                              'not in TCGA-CDR, no clinical data in GDC r46)'),
+    'TCGA-BW-A5NP': (0, 289, 'GDC r46: Alive, treatment end at 289 d (last follow-up 102 d)'),
+    'TCGA-BR-A4CR': (0, 51, 'cBioPortal stad_tcga_pub: LIVING, 1.68 months'),
+    'TCGA-BR-4369': (0, 20, 'GDC r46: Alive, days_to_consent 20 (all follow-ups 0)'),
+    'TCGA-BR-8679': (0, 5, 'cBioPortal stad_tcga_pub: LIVING, 0.16 months'),
+    # dead, no death date: latest date known alive
+    'TCGA-24-0968': (1, 598, 'GDC r46 + BCR: Dead, last contact 598 d (ov_tcga_pub: DECEASED 19.61 months)'),
+    'TCGA-63-A5MU': (1, 420, 'GDC r46: Dead (no death date), progression at 420 d; PanCanAtlas PFS 420 d'),
+    'TCGA-3M-AB47': (1, 395, 'GDC r46: Dead (no death date, cause: stomach cancer), recurrence at 395 d'),
+    'TCGA-IN-A6RO': (1, 200, 'GDC r46 + BCR: Dead (death date [Discrepancy] in BCR), treatment end at 200 d'),
+    'TCGA-GV-A3QG': (1, 84, 'GDC r46: Dead (death date [Discrepancy] in BCR), progression at 84 d; PanCanAtlas PFS 84 d '
+                            '(blca_tcga_pub OS 0.36 months contradicts the progression)'),
+    'TCGA-6A-AB49': (1, 31, 'GDC r46: Dead (no death date), days_to_consent 31'),
+    'TCGA-56-6546': (1, 26, 'GDC r46: Dead (no death date), days_to_consent 26'),
+    'C3N-02723': (1, 2, 'Li et al. Cancer Cell 2023 Table S1: dead, OS 2 d (GDC r46: days_to_death -6; '
+                        'cause of death: surgical complications)'),
+}
 
 
 def read_ids(path):
@@ -118,6 +145,16 @@ def build(name, label_file, os_table, slides, modalities, out_dir, keep_mask=Non
         drop = keep_mask.reindex(labels.case_id.unique())
         removed = sorted(drop[drop == False].index)
         labels = labels[~labels.case_id.isin(removed)]
+    # follow-up <= 0 days is not a valid survival time: use the OS found elsewhere, otherwise remove the patient
+    overridden = sorted(set(labels.case_id) & set(OS_OVERRIDES))
+    for pid in overridden:
+        event, days, _ = OS_OVERRIDES[pid]
+        rows = labels.case_id == pid
+        labels.loc[rows, 'FUT'] = f'{float(days):.1f}'
+        labels.loc[rows, 'Survival'] = str(event)
+        labels.loc[rows, 'True_Label'] = 'Dead' if event == 1 else 'Alive'
+    non_positive = sorted(labels.loc[pd.to_numeric(labels.FUT, errors='coerce') <= 0, 'case_id'].unique())
+    labels = labels[~labels.case_id.isin(non_positive)]
     labeled = set(labels.case_id)
 
     universe = sorted(set(slides.values) | set().union(*modalities.values()) | labeled)
@@ -168,6 +205,10 @@ def build(name, label_file, os_table, slides, modalities, out_dir, keep_mask=Non
           f'({len(first) - len(chk)} existing patients not in source)')
     if removed:
         print(f'  existing patients removed (histology): {removed}')
+    if overridden:
+        print(f'  OS replaced (follow-up was <= 0 days): ' + ', '.join(f'{p} -> {OS_OVERRIDES[p][2]}' for p in overridden))
+    if non_positive:
+        print(f'  existing patients removed (follow-up <= 0 days, no OS found elsewhere): {len(non_positive)}')
     print(f'  patients: existing {len(labeled)} + added {len(added)} = {len(labeled) + len(added)}'
           f'  | rows {len(labels)} -> {len(updated)}')
     print(f'  added patients by modality: ' +
