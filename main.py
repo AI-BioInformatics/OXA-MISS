@@ -229,7 +229,7 @@ if __name__ == "__main__":
         entity="multimodal_decider",
         name=wandb_name,
         config=unmunchify(config),
-        mode=config.wandb.mode,
+        mode="disabled" if args.debug else config.wandb.mode,  # an explicit mode overrides WANDB_DISABLED
         settings=wandb.Settings(_service_wait=900)
     )
 
