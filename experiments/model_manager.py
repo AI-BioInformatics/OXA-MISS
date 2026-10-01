@@ -691,6 +691,8 @@ class ModelManager():
         for model, summary_path in zip(models, summary_paths):
             model = model.to(device)
             model.eval()
+            if hasattr(model, "return_xa_attentions") or model.__class__.__name__ == "OXA_MISS":
+                model.return_xa_attentions = Save_XA_attention_files
             save_attentions = (lambda batch, step_result: self.save_XA_attentions(
                 batch, step_result, path, partition="test", epoch="best" if best else "last")) if Save_XA_attention_files else None
             log_dict, tloss = self._run_eval(test_dataloader, task_type, device, model=model,

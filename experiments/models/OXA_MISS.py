@@ -73,9 +73,16 @@ class OXA_MISS(nn.Module):
                     WSI_level_encoder_dropout= 0.2,
                     WSI_level_encoder_sizes= [768, 60, 10],
                     WSI_level_encoder_LayerNorm= False,
+                    xa_fusion=True,
                     ):
         super(OXA_MISS,self).__init__()
         self.input_modalities = input_modalities
+        # xa_fusion (default True): the WSI <-> genomics cross-attention outputs update the patch / genomics
+        # embeddings used for the prediction. False = previous model, where the cross-attention outputs were
+        # discarded: it is then computed only when its attention maps are requested (return_xa_attentions,
+        # set by ModelManager to save them).
+        self.xa_fusion = xa_fusion
+        self.return_xa_attentions = False
         self.inner_proj = nn.Linear(input_dim, inner_dim)
         self.output_dim = output_dim
         self.device="cuda" if torch.cuda.is_available() else "cpu"
@@ -239,55 +246,56 @@ class OXA_MISS(nn.Module):
                 cnv_groups.append(cnv_group_i)
             cnv_embedding = torch.stack(cnv_groups, dim=1)
 
+        # getattr: models pickled before these options existed (old checkpoints, trained without the fusion)
+        # keep their original behaviour
+        xa_fusion = getattr(self, "xa_fusion", False)
+        compute_xa = xa_fusion or getattr(self, "return_xa_attentions", False)
         XA_attentions = {}
         if wsi_on:
-            if genomics_on:
-                x, att_patches_to_genomics = self.patches_XA(patch_embeddings, genomics_embedding)
-            else:
-                att_patches_to_genomics = None
-            if cnv_on:
-                y, att_patches_to_cnv = self.patches_XA(patch_embeddings, cnv_embedding)
-            else:
-                att_patches_to_cnv = None
-            if genomics_on:
-                patch_embeddings_updated = patch_embeddings + x  
-            else:
-                patch_embeddings_updated = patch_embeddings
-            if cnv_on:
-                patch_embeddings_updated = patch_embeddings + y
-            else:
-                patch_embeddings_updated = patch_embeddings
-            XA_attentions["att_patches_to_genomics"] = att_patches_to_genomics.detach() if att_patches_to_genomics is not None else None
-            XA_attentions["att_patches_to_cnv"] =  att_patches_to_cnv.detach() if att_patches_to_cnv is not None else None
+            pooled_patches = patch_embeddings  # embeddings pooled by the latent queries
+            if compute_xa:
+                att_patches_to_genomics = att_patches_to_cnv = None
+                if genomics_on:
+                    x, att_patches_to_genomics = self.patches_XA(patch_embeddings, genomics_embedding)
+                if cnv_on:
+                    y, att_patches_to_cnv = self.patches_XA(patch_embeddings, cnv_embedding)
+                if xa_fusion:
+                    # patches updated with both the genomics and the CNV context (the CNV update used to
+                    # overwrite the genomics one)
+                    if genomics_on:
+                        pooled_patches = pooled_patches + x
+                    if cnv_on:
+                        pooled_patches = pooled_patches + y
+                XA_attentions["att_patches_to_genomics"] = att_patches_to_genomics.detach() if att_patches_to_genomics is not None else None
+                XA_attentions["att_patches_to_cnv"] =  att_patches_to_cnv.detach() if att_patches_to_cnv is not None else None
             
-            keys = self.W_k(patch_embeddings) #(patch_embeddings_updated)
+            keys = self.W_k(pooled_patches)
             scores = torch.matmul(latent_queries, keys.transpose(1, 2))
             scores /= keys.size(-1) ** 0.5  # same value as torch.sqrt(tensor(d)), without a new tensor per forward
             scores = gate.transpose(-1,-2) * scores 
             scores = self.wsi_dropout(scores)
             A_out = scores
             scores = F.softmax(scores, dim=-1)
-            latent = torch.matmul(scores,patch_embeddings) #patch_embeddings_updated)
+            latent = torch.matmul(scores, pooled_patches)
             latent = latent.flatten(start_dim=1)
 
             #Extract high level features
             wsi_embedding = self.fc(latent)
 
-        if genomics_on:
+        if genomics_on and compute_xa:
+            att_genomics_to_patches = att_genomics_to_cnv = None
             if wsi_on:
                 x, att_genomics_to_patches = self.genomics_XA(genomics_embedding, patch_embeddings)
-            else:
-                att_genomics_to_patches = None
             if cnv_on:
                 y, att_genomics_to_cnv = self.genomics_XA(genomics_embedding, cnv_embedding)
-            else:
-                att_genomics_to_cnv = None
-            # if wsi_on:
-            #     genomics_embedding = genomics_embedding + x
-            # if cnv_on:
-            #     genomics_embedding = genomics_embedding + y
+            if xa_fusion:
+                if wsi_on:
+                    genomics_embedding = genomics_embedding + x
+                if cnv_on:
+                    genomics_embedding = genomics_embedding + y
             XA_attentions["att_genomics_to_patches"] = att_genomics_to_patches.detach() if att_genomics_to_patches is not None else None
             XA_attentions["att_genomics_to_cnv"] = att_genomics_to_cnv.detach() if att_genomics_to_cnv is not None else None
+        if genomics_on:
 
             genomics_embedding = genomics_embedding.sum(dim=1, keepdim=False)
 
@@ -310,46 +318,45 @@ class OXA_MISS(nn.Module):
 
             cnv_embedding = cnv_embedding.sum(dim=1, keepdim=False)
 
+        # zero embedding, created directly on the inputs' device (no CPU -> GPU copy)
+        missing_embedding = lambda: torch.zeros((data['patch_features'].shape[0], self.inner_proj.out_features),
+                                                device=data['patch_features'].device)
+        # "sum": only the available modalities are appended, so the mean is over them;
+        # "concatenate": the output layer has a fixed input size, so a missing modality keeps its slot with zeros
         modalities = []
         if "WSI" in self.input_modalities:
             if wsi_on:
                 modalities.append(wsi_embedding)
-            else:
-                wsi_embedding = torch.zeros((data['patch_features'].shape[0], self.inner_proj.out_features)).to(self.device)
-                modalities.append(wsi_embedding)
+            elif self.fusion_type == "concatenate":
+                modalities.append(missing_embedding())
         if "Genomics" in self.input_modalities:
             if genomics_on:
                 modalities.append(genomics_embedding)
-            else:
-                genomics_embedding = torch.zeros((data['patch_features'].shape[0], self.inner_proj.out_features)).to(self.device)
-                modalities.append(genomics_embedding)
+            elif self.fusion_type == "concatenate":
+                modalities.append(missing_embedding())
         if "CNV" in self.input_modalities:
             if cnv_on:
                 modalities.append(cnv_embedding)
-            else:
-                cnv_embedding = torch.zeros((data['patch_features'].shape[0], self.inner_proj.out_features)).to(self.device)
-                modalities.append(cnv_embedding)
-        if 'CT' in self.input_modalities:
+            elif self.fusion_type == "concatenate":
+                modalities.append(missing_embedding())
+        if "CT" in self.input_modalities:
             if ct_on:
                 modalities.append(ct_embedding)
-            else:
-                ct_embedding = torch.zeros((data['patch_features'].shape[0], self.inner_proj.out_features)).to(self.device)
-                modalities.append(ct_embedding)
-        if 'MRI' in self.input_modalities:
+            elif self.fusion_type == "concatenate":
+                modalities.append(missing_embedding())
+        if "MRI" in self.input_modalities:
             if mri_on:
                 modalities.append(mri_embedding)
-            else:
-                mri_embedding = torch.zeros((data['patch_features'].shape[0], self.inner_proj.out_features)).to(self.device)
-                modalities.append(mri_embedding)
-        if 'Clinical' in self.input_modalities:
+            elif self.fusion_type == "concatenate":
+                modalities.append(missing_embedding())
+        if "Clinical" in self.input_modalities:
             if clinical_on:
                 modalities.append(clinical_embedding)
-            else:
-                clinical_embedding = torch.zeros((data['patch_features'].shape[0], self.inner_proj.out_features)).to(self.device)
-                modalities.append(clinical_embedding)
-            
+            elif self.fusion_type == "concatenate":
+                modalities.append(missing_embedding())
+
         if self.fusion_type == "sum":
-            x = torch.stack(modalities, dim=0).mean(dim=0)
+            x = torch.stack(modalities, dim=0).mean(dim=0) if modalities else missing_embedding()
         elif self.fusion_type == "concatenate":
             x = torch.cat(modalities, dim=1)
         else:

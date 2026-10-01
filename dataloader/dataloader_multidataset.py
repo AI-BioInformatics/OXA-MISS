@@ -5,7 +5,7 @@ import numpy as np
 from copy import deepcopy
 from sklearn.preprocessing import StandardScaler
 from torch.utils.data import Dataset, DataLoader, Subset
-from .dataloader_utils import extract_names, report_patients_not_in_dataset
+from .dataloader_utils import extract_names
 import yaml
 from munch import munchify
 import json
@@ -461,6 +461,8 @@ class Multimodal_Bio_Dataset(Dataset):
         print(f"Patients with each input modality (label files), kept = at least one of {self.input_modalities}"
               + (" [SurvPath: WSI and Genomics]" if self.model_name == 'SurvPath' else "") + ":")
         print(summary.to_string())
+        # labelled patients left out because they have none of the input modalities (reported per split)
+        self.patients_without_input_modalities = set(self.patient_df.index[~keep])
         self.patient_df = self.patient_df[keep]
 
     def _compute_patient_df(self):
@@ -490,12 +492,12 @@ class Multimodal_Bio_Dataset(Dataset):
         """Copy of data (patients x genes) z-scored with a StandardScaler fitted on the training patients,
         applied to the training, validation and test patients (the others keep the raw values)."""
         available = self.patient_df.join(data, how="inner").index
-        def kept(partition, patients):
+        def kept(_partition, patients):
             if patients is None:
                 return None
-            patients_kept = patients[np.isin(patients, available)]
-            report_patients_not_in_dataset(f"{partition} (normalization)", patients, patients_kept)
-            return pd.Index(patients_kept)
+            # patients without data for this modality are just skipped by the standardization (no message:
+            # every patient in the dataset has at least one input modality, which the model uses)
+            return pd.Index(patients[np.isin(patients, available)])
         train_idx, val_idx, test_idx = kept("train", train_patients), kept("val", val_patients), kept("test", test_patients)
         normalized = deepcopy(data)
         scaler = StandardScaler().fit(normalized.loc[train_idx, :])

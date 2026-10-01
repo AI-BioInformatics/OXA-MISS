@@ -41,12 +41,19 @@ def extract_names(f):
     return sample, tissue, treatment_phase, side
 
 
-def report_patients_not_in_dataset(partition, requested, kept, n_show=5):
-    """Split patients dropped because they are not in the dataset (e.g. none of the input modalities)."""
-    missing = sorted(set(requested) - set(kept))
-    if missing:
-        print(f"{len(missing)}/{len(requested)} {partition} patients of the split are not in the dataset "
-              f"(no label or none of the input modalities), e.g. {missing[:n_show]}")
+def report_patients_not_in_dataset(partition, requested, kept, dataset, n_show=5):
+    """Split patients left out of a loader. Printed only for patients with none of the input modalities of
+    this run (a patient with at least one of them is used); patients without a valid OS label (not expected
+    with the current label files and splits) are reported on their own line."""
+    missing = set(requested) - set(kept)
+    no_modality = sorted(missing & dataset.patients_without_input_modalities)
+    no_label = sorted(missing - dataset.patients_without_input_modalities)
+    if no_modality:
+        print(f"{len(no_modality)}/{len(requested)} {partition} patients have none of the input modalities "
+              f"{list(dataset.input_modalities)}: left out, e.g. {no_modality[:n_show]}")
+    if no_label:
+        print(f"[❗] {len(no_label)}/{len(requested)} {partition} patients of the split have no valid OS label: "
+              f"left out, e.g. {no_label[:n_show]}")
 
 
 def get_dataloaders(dataset, train_patients, val_patients, test_patients, config):
@@ -63,7 +70,7 @@ def get_dataloaders(dataset, train_patients, val_patients, test_patients, config
         if patients is None:
             return None
         patients = patients[np.isin(patients, dataset.patient_df.index)]
-        report_patients_not_in_dataset(partition, requested_patients[partition], patients)
+        report_patients_not_in_dataset(partition, requested_patients[partition], patients, dataset)
         generator = None
         if train:
             generator = Generator()
