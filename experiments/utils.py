@@ -8,6 +8,7 @@ from lifelines import KaplanMeierFitter
 from lifelines.statistics import logrank_test
 from sklearn.metrics import confusion_matrix
 from sksurv.metrics import concordance_index_censored
+from sksurv.exceptions import NoComparablePairException
 from collections import defaultdict
 import logging
 
@@ -51,13 +52,82 @@ def km_risk_groups_plot(times_days, events, risks, title, folds=None):
     return fig, p_value
 
 
+def survival_at_edges(logits):
+    """Discrete-time hazard logits (N, K) -> survival at the K+1 bin edges (N, K+1): S(edge_0) = 1,
+    S(edge_k+1) = prod_{j<=k} (1 - h_j) (the NLL model: label k = event in bin k)."""
+    hazards = 1 / (1 + np.exp(-np.asarray(logits, dtype=float)))
+    return np.concatenate([np.ones((len(hazards), 1)), np.cumprod(1 - hazards, axis=1)], axis=1)
+
+
+def survival_at(S_edges, edges, times):
+    """Survival of each patient at times (N,) or at a common grid (T,) -> (N,) or (N, T): linear
+    interpolation of the curve between the bin edges (days), constant outside."""
+    edges = np.asarray(edges, dtype=float)
+    if np.ndim(times) == 1 and len(times) == len(S_edges):
+        return np.array([np.interp(t, edges, s) for t, s in zip(times, S_edges)])
+    return np.stack([np.interp(times, edges, s) for s in S_edges])
+
+
+def _surv(events, times):
+    from sksurv.util import Surv
+    return Surv.from_arrays(event=np.asarray(events, dtype=bool), time=np.asarray(times, dtype=float))
+
+
+def extended_survival_metrics(logits, censorships, times, edges, train_censorships=None, train_times=None):
+    """Uno's c-index (IPCW, censoring from the training patients), integrated Brier score and D-calibration
+    (Haider et al., JMLR 2020: chi-square p-value, > 0.05 = calibrated) of a test set. NaN when undefined.
+    Without training patients the censoring distribution is estimated on the test set itself."""
+    from sksurv.metrics import concordance_index_ipcw, integrated_brier_score
+    from scipy.stats import chisquare
+    events = 1 - np.asarray(censorships, dtype=int)
+    times = np.asarray(times, dtype=float)
+    if train_times is None:
+        train_censorships, train_times = censorships, times
+    train = _surv(1 - np.asarray(train_censorships, dtype=int), train_times)
+    test = _surv(events, times)
+    S_edges = survival_at_edges(logits)
+    risk = -S_edges.sum(axis=1)
+    out = {"c-index_uno": np.nan, "IBS": np.nan, "D-cal_p": np.nan, "D-cal_stat": np.nan}
+    # time range where the censoring distribution of the training set is defined
+    t_max = min(np.max(train_times), np.percentile(times, 95))
+    try:
+        out["c-index_uno"] = float(concordance_index_ipcw(train, test, risk, tau=t_max)[0])
+    except Exception as e:
+        logging.warning(f"Uno c-index undefined: {e}")
+    try:
+        grid = np.linspace(np.percentile(times, 5), t_max, 50, endpoint=False)
+        out["IBS"] = float(integrated_brier_score(train, test, survival_at(S_edges, edges, grid), grid))
+    except Exception as e:
+        logging.warning(f"IBS undefined: {e}")
+    # D-calibration: S_i(t_i) uniform on [0, 1]; a censored patient spreads its mass over [0, S_i(c_i)]
+    s = np.clip(survival_at(S_edges, edges, times), 1e-12, 1.0)
+    n_bins = 10
+    lower = np.arange(n_bins) / n_bins
+    counts = np.zeros(n_bins)
+    for si, ei in zip(s, events):
+        b = min(int(si * n_bins), n_bins - 1)
+        if ei:
+            counts[b] += 1
+        else:
+            counts[b] += (si - lower[b]) / si
+            counts[:b] += (1 / n_bins) / si
+    if len(s) >= n_bins:
+        stat, p = chisquare(counts, f_exp=np.full(n_bins, counts.sum() / n_bins))
+        out["D-cal_p"], out["D-cal_stat"] = float(p), float(stat)
+    return out
+
+
 def safe_c_index(censorships, event_times, risk_scores):
     """c-index, NaN when it is undefined (fewer than 2 patients or no events) instead of raising."""
     events = (1 - np.asarray(censorships)).astype(bool)
     if len(events) < 2 or not events.any():
         logging.warning(f"c-index undefined ({len(events)} patients, {int(events.sum())} events): set to NaN")
         return np.nan
-    return concordance_index_censored(events, np.asarray(event_times), np.asarray(risk_scores), tied_tol=1e-08)[0]
+    try:
+        return concordance_index_censored(events, np.asarray(event_times), np.asarray(risk_scores), tied_tol=1e-08)[0]
+    except NoComparablePairException:  # events, but none before another patient's time (e.g. a few patients)
+        logging.warning(f"c-index undefined ({len(events)} patients, {int(events.sum())} events, no comparable pairs): set to NaN")
+        return np.nan
 
 import importlib.util
 import sys
@@ -224,6 +294,10 @@ class ResultsStore:
         if df["dataset_name"].nunique() > 1:
             for dataset, d in df.groupby("dataset_name"):
                 pooled[f"{dataset}_c-index_pooled"] = safe_c_index(d["all_censorships"], d["all_original_event_times"], d["all_risk_scores"])
+            # pooled - mean within-cohort c-index: > 0 = part of the pooled ranking comes from differences
+            # BETWEEN cohorts (e.g. the model recognizing the cohort), not from ranking patients within each
+            within = [v for k, v in pooled.items() if k != "c-index_pooled" and not np.isnan(v)]
+            pooled["cohort_gap"] = pooled["c-index_pooled"] - np.mean(within) if within else np.nan
         return pooled
         
     def fold_table(self, scenario):
@@ -267,6 +341,10 @@ class ResultsStore:
                     "c-index_list": c_indices,
                     **self.pooled_c_index(scenario, model_version),
                 }
+                for key in ("c-index_uno", "IBS", "D-cal_p", "D-cal_stat"):   # D-cal_stat: chi-square, lower = better calibrated
+                    if all(key in r for r in fold_results):
+                        values = [r[key] for r in fold_results]
+                        metrics[f"{key}_mean"], metrics[f"{key}_std"] = np.nanmean(values), np.nanstd(values)
                 if all("n_patients" in r for r in fold_results):
                     metrics["n_patients"] = int(sum(r["n_patients"] for r in fold_results))
                     metrics["n_events"] = int(sum(r["n_events"] for r in fold_results))

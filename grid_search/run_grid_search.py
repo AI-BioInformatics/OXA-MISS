@@ -1,38 +1,53 @@
-import subprocess, json, os, time
+"""
+Submits a grid search as one SLURM array job: task i runs main.py on version i of the versions json
+(see grid_search/make_modality_grid.py). Run it on the login node: it only calls sbatch.
+
+    python grid_search/run_grid_search.py --config config/OXA_MISS_ccRCC.yaml \
+        --versions grid_search/models_versions/OXA_MISS_ccRCC_modalities.json [--max_parallel 8] [--dry_run]
+        [--sbatch_args="--mem=120G --time=24:00:00"]
+    extra main.py arguments after --, e.g.  -- --seed 43
+"""
 import argparse
+import json
+import os
+import shlex
+import subprocess
+import sys
+
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SH_PATH = os.path.join(REPO, 'grid_search', 'run_grid_search.sh')
 
 
+def main():
+    argv = sys.argv[1:]
+    extra = argv[argv.index('--') + 1:] if '--' in argv else []
+    argv = argv[:argv.index('--')] if '--' in argv else argv
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument('--config', required=True)
+    ap.add_argument('--versions', required=True)
+    ap.add_argument('--indices', default=None, help='subset of versions, sbatch --array syntax (e.g. 0,3,7-9)')
+    ap.add_argument('--max_parallel', type=int, default=8, help='array tasks running at the same time')
+    ap.add_argument('--sbatch_args', default='', help='extra sbatch options (override the #SBATCH of '
+                    'run_grid_search.sh); use the = form, e.g. --sbatch_args=--mem=120G or '
+                    '--sbatch_args="--mem=120G --time=24:00:00" (a value starting with -- would be read as an option)')
+    ap.add_argument('--dry_run', action='store_true')
+    args = ap.parse_args(argv)
+
+    config, versions = os.path.abspath(args.config), os.path.abspath(args.versions)
+    for path in (config, versions, SH_PATH):
+        if not os.path.isfile(path):
+            raise SystemExit(f"not found: {path}")
+    with open(versions) as f:
+        n = len(json.load(f))
+    if n == 0:
+        raise SystemExit(f"{versions} has no versions")
+    indices = args.indices or f"0-{n - 1}"
+    cmd = ['sbatch', f'--array={indices}%{args.max_parallel}'] + shlex.split(args.sbatch_args) + \
+          [SH_PATH, config, versions] + extra
+    print(' '.join(cmd))
+    if not args.dry_run:
+        subprocess.run(cmd, check=True)
 
 
-def run_grid_search(sh_path, grid_search_versions_path, model_name):
-    # Leggi il file JSON
-    with open(grid_search_versions_path, 'r') as f:
-        grid_search_versions = json.load(f)
-
-
-    # Itera su ogni indice della lista
-    for i in range(0, len(grid_search_versions)):
-    # for i in [8,9]:
-        time.sleep(0.5)
-        tumor= grid_search_versions[i]['data_loader']['KFold']['splits'].split('/')[-1]
-        subprocess.run(["sbatch","--output", f"/slurm_out/{model_name}_%j_{tumor}.out", sh_path, "--grid_search_model_version_index", str(i), "--model_name", model_name], check=True)
- 
-if __name__ == "__main__":
-    #Prendi model name da riga di comando
-    parser = argparse.ArgumentParser(description='Run grid search for model versions.')
-    parser.add_argument('--model_name', type=str, required=True, default='MUSE', help='Name of the model (e.g., Custom_Multimodal_XA or MUSE).')
-    model_name = parser.parse_args().model_name
-    sh_path = "./grid_search/run_grid_search.sh"
-    grid_search_versions_path = f"./grid_search/models_versions/{model_name}_versions.json"
-
-    if not os.path.isfile(sh_path):
-        raise FileNotFoundError(f"Il file {sh_path} non esiste.")
-    if not sh_path.endswith(".sh"):
-        raise ValueError(f"Il file {sh_path} non è un file .sh.")
-    
-    if not os.path.isfile(grid_search_versions_path):
-        raise FileNotFoundError(f"Il file {grid_search_versions_path} non esiste.")
-    if not grid_search_versions_path.endswith(".json"):
-        raise ValueError(f"Il file {grid_search_versions_path} non è un file JSON.")
-    # Esegui la funzione con i parametri forniti
-    run_grid_search(sh_path, grid_search_versions_path, model_name)
+if __name__ == '__main__':
+    main()

@@ -1,125 +1,50 @@
 #!/bin/bash
 #SBATCH --partition=all_usr_prod
-#SBATCH --gres=gpu:1
-#SBATCH --mem=80G
-#SBATCH --job-name=Frontiers_OXA
-#SBATCH --time=01:00:00
-#SBATCH --output=/work/H2020DeciderFicarra/fmiccolis/Frontiers/logs/%j_OXA_MISS.out
-#SBATCH --cpus-per-task=2
 #SBATCH --account=H2020DeciderFicarra
-#SBATCH--constraint="gpu_A40_45G|gpu_L40S_45G|gpu_RTX5000_16G|gpu_RTX6000_24G|gpu_RTX_A5000_24G"
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --gres=gpu:1
+#SBATCH --cpus-per-task=2
+#SBATCH --mem=80G
+#SBATCH --time=24:00:00
+#SBATCH --job-name=OXA_MISS_grid
+#SBATCH --output=/work/H2020DeciderFicarra/ccRCC/logs/grid_%A_%a.log
+#SBATCH --constraint="gpu_A40_45G|gpu_L40S_45G|gpu_RTX5000_16G|gpu_RTX6000_24G|gpu_RTX_A5000_24G"
 
-# |gpu_2080Ti_11G
-# Variabile booleana per indicare se il parametro è stato trovato
-# found=false
+# One version of a grid search per array task (version index = SLURM_ARRAY_TASK_ID). Submit with
+# grid_search/run_grid_search.py, or directly:
+#   sbatch --array=0-<N-1>%<max parallel> grid_search/run_grid_search.sh <config.yaml> <versions.json> [main.py args]
+set -eo pipefail
+
+if [[ $# -lt 2 ]]; then
+    echo "usage: sbatch --array=0-<N-1> $0 <config.yaml> <versions.json> [extra main.py args]" >&2
+    exit 1
+fi
+if [[ -z "${SLURM_ARRAY_TASK_ID:-}" ]]; then
+    echo "SLURM_ARRAY_TASK_ID not set: submit as an array job (sbatch --array=...)" >&2
+    exit 1
+fi
+# absolute paths: the script cd's into the repo below, relative paths are of the submit directory
+config_path="$(realpath "$1")"
+versions_path="$(realpath "$2")"
+shift 2
+REPO=/work/H2020DeciderFicarra/ccRCC/OXA-MISS
+[[ -f "$config_path" ]] || { echo "config not found: $config_path" >&2; exit 1; }
+[[ -f "$versions_path" ]] || { echo "versions not found: $versions_path" >&2; exit 1; }
 
 nvidia-smi
-# module list
-# module avail
-module unload cuda/12.1
-module load cuda/11.8
-# nvcc --version
-
-# . /usr/local/anaconda3/etc/profile.d/conda.sh
-source /homes/admin/spack/opt/spack/linux-ivybridge/anaconda3-2023.09-0-*/etc/profile.d/conda.sh
-conda deactivate
+module unload cuda || true  # whatever version is loaded (cuda/default), otherwise loading 11.8 conflicts
+module load cuda/11.8.0
+# the spack architecture folder of anaconda changed (linux-ivybridge -> linux-x86_64_v2): look it up
+source "$(ls /homes/admin/spack/opt/spack/linux-*/anaconda3-*/etc/profile.d/conda.sh | head -n 1)"
+conda deactivate || true
 conda activate multimodal_decider
-# # Scorri tutti i parametri passati allo script
-# for ((i = 1; i <= $#; i++)); do
-#   arg="${!i}"
-  
-#   if [[ $arg == --grid_search_model_version_index ]]; then
-#     # Prendi il valore dal parametro successivo
-#     next_index=$((i + 1))
-#     grid_search_model_version_index="${!next_index}"
-#     # echo "Valore di --grid_search_model_version_index: $grid_search_model_version_index"
-#     found=true
-#     break
-#   fi
-# done
+set -u  # after conda: its activation scripts read unset variables
 
-# if [ "$found" = false ]; then
-#     echo "Error: --grid_search_model_version_index parameter not found"
-#     exit 1
-# fi
-
-
-# Parse arguments con while (scalabile e pulito)
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --grid_search_model_version_index)
-      grid_search_model_version_index="$2"
-      shift 2
-      ;;
-    --model_name)
-      model_name="$2"
-      shift 2
-      ;;
-    *)
-      echo "❌ Errore: argomento sconosciuto: $1"
-      exit 1
-      ;;
-  esac
-done
-
-
- Check obbligatori
-if [[ -z "$grid_search_model_version_index" ]]; then
-    echo "❌ Errore: parametro --grid_search_model_version_index mancante"
-    exit 1
-fi
-
-if [[ -z "$model_name" ]]; then
-    echo "❌ Errore: parametro --model_name mancante"
-    exit 1
-fi
-
-echo "✅ Parametri letti correttamente:"
-echo "Grid Search Index: $grid_search_model_version_index"
-echo "Model Name: $model_name"
-config_path="/work/H2020DeciderFicarra/fmiccolis/Frontiers/OXA-MISS/config/${model_name}.yaml"
-# Mappa modello -> config file
-# case "$model_name" in
-#   "OXA_MISS")
-#     config_path="/work/H2020DeciderFicarra/fmiccolis/Frontiers/OXA-MISS/config/OXA_MISS.yaml"
-#     ;;
-#   "CLAM")\
-#     config_path="/work/H2020DeciderFicarra/fmiccolis/Frontiers/OXA-MISS/config/CLAM.yaml"
-#     ;;
-#   "ABMIL")
-#     config_path="/work/H2020DeciderFicarra/fmiccolis/Frontiers/OXA-MISS/config/ABMIL.yaml"
-#     ;;
-#   "TransMIL")
-#     config_path="/work/H2020DeciderFicarra/fmiccolis/Frontiers/OXA-MISS/config/TransMIL.yaml"
-#     ;;
-#   *)
-#     echo "❌ Errore: modello sconosciuto '$model_name'"
-#     exit 1
-#     ;;
-# esac
-
-echo "🔗 Config YAML selezionato: $config_path"
-
-# Esegui il tuo Python
-~/.conda/envs/multimodal_decider/bin/python /work/H2020DeciderFicarra/fmiccolis/Frontiers/OXA-MISS/main.py \
+echo "config: $config_path | versions: $versions_path | index: $SLURM_ARRAY_TASK_ID"
+cd "$REPO"
+~/.conda/envs/multimodal_decider/bin/python "$REPO/main.py" \
     --config "$config_path" \
-    --grid_search_model_version_index "$grid_search_model_version_index" \
-    --verbose
-
-
-# #Treatment Response chemorefractory
-# python /work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/main.py --config /work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/config/experiments/custom_multimodal_XA_TR_MISSING_MODALITIES_chemorefractory.yaml --grid_search_model_version_index ${grid_search_model_version_index} --verbose --seed ${SLURM_ARRAY_TASK_ID} 
-
-# #Overall Survival chemorefractory
-# python /work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/main.py --config /work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/config/experiments/custom_multimodal_XA_OS_MISSING_MODALITIES_chemorefractory.yaml --grid_search_model_version_index ${grid_search_model_version_index} --verbose --seed ${SLURM_ARRAY_TASK_ID} 
-
-# OS dataset TCGA
-# ~/.conda/envs/multimodal_decider/bin/python /work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/main.py --config /work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/config/experiments/custom_multimodal_XA_MISSING_MODALITIES.yaml --grid_search_model_version_index ${grid_search_model_version_index} --verbose 
-
-# ~/.conda/envs/multimodal_decider/bin/python /work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/main.py --config /work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/config/experiments/custom_multimodal_XA_v2_MISSING_MODALITIES.yaml --grid_search_model_version_index ${grid_search_model_version_index} --verbose 
-
-
-# OS dataset TCGA - MUSE
-# ~/.conda/envs/multimodal_decider/bin/python /work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/main.py \
-#   --config /work/H2020DeciderFicarra/D2_4/Development/MultimodalDecider/config/experiments/MUSE_OS_MISSING_MODALITIES.yaml \
-#   --grid_search_model_version_index ${grid_search_model_version_index} --verbose 
+    --grid_search_versions "$versions_path" \
+    --grid_search_model_version_index "$SLURM_ARRAY_TASK_ID" \
+    --verbose "$@"

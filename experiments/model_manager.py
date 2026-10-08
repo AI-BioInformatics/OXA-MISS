@@ -13,7 +13,7 @@ from lifelines.statistics import logrank_test
 from sklearn.metrics import roc_auc_score, f1_score, recall_score, balanced_accuracy_score
 import matplotlib.pyplot as plt
 import copy
-from .utils import accuracy_confusionMatrix_plot, move_to_device, safe_c_index, km_risk_groups_plot
+from .utils import accuracy_confusionMatrix_plot, move_to_device, safe_c_index, km_risk_groups_plot, extended_survival_metrics
 import os
 DEBUG_BATCHES = 8
 
@@ -29,6 +29,9 @@ class ModelManager():
         self.real_batch_size = config.data_loader.real_batch_size
         self.NUM_ACCUMULATION_STEPS = self.real_batch_size//config.data_loader.batch_size
         self.attention_dir_check = False
+        # modalities of the test loader being evaluated (the first test set during training; set by evaluate)
+        test_sets = config.data_loader.get('modalities', {}).get('test')
+        self.eval_modalities = list(test_sets[0]) if test_sets else None
         model_kwargs = config.model.kwargs
         # ct_emb_dim / mri_emb_dim: feature size of the CT / MRI embeddings, set by main.py from the dataset
         model_kwargs.setdefault('ct_emb_dim', None)
@@ -139,12 +142,54 @@ class ModelManager():
         else:
             weights   =  torch.load(path, map_location=torch.device(device), weights_only=False)["state_dict"] 
             self.net.load_state_dict(weights, strict=False) 
+    def test_modalities_tag(self, test_modalities):
+        """'test_<m1+m2>' for a test modality set different from the training modalities, else None."""
+        if test_modalities is None or set(test_modalities) == set(self.config.model.kwargs.input_modalities):
+            return None
+        return "test_" + "+".join(test_modalities)
+
+    def set_reference_survival(self, censorships, times):
+        """Censorship / follow-up of the fold's training patients: censoring distribution of Uno's c-index and
+        of the integrated Brier score (IPCW)."""
+        self.reference_survival = (np.asarray(censorships), np.asarray(times, dtype=float))
+
     def get_dataset_name(self):
-        split_path = self.config.data_loader.KFold.splits if isinstance(self.config.data_loader.KFold.splits, str) else self.config.data_loader.KFold.splits[0]
+        # splits in the dataset yamls (one folder per dataset, folds concatenated): the dataset names
+        legacy_splits = self.config.data_loader.get('KFold', {}).get('splits')
+        if not legacy_splits:
+            return '+'.join(self.config.data_loader.get('dataset_names', [])) or 'unknown'
+        split_path = legacy_splits if isinstance(legacy_splits, str) else legacy_splits[0]
         if "chemorefractory" in split_path.lower():
             return "Decider"
         else:
             return split_path.strip("/").split("/")[-1]
+
+    @staticmethod
+    def _event_distribution(logits):
+        """Discrete event-time distribution of hazard logits (B, K) -> (B, K+1): p_k = S_{k-1} h_k, and the
+        mass surviving past the last bin."""
+        h = torch.sigmoid(logits).clamp(1e-6, 1 - 1e-6)
+        S = torch.cumprod(1 - h, dim=-1)
+        S_prev = torch.cat([torch.ones_like(S[:, :1]), S[:, :-1]], dim=-1)
+        return torch.cat([S_prev * h, S[:, -1:]], dim=-1)
+
+    def _multilevel_loss(self, multilevel, labels, censorships, task_type):
+        """Survival loss on every smaller radiology configuration of the patient (aux_weight) and
+        KL(parent detached || child) between each configuration and its parents with one exam less
+        (consistency_weight): every configuration is predictive, a richer one refines the poorer one."""
+        loss = 0.0
+        subsets = multilevel["subsets"]
+        if subsets:
+            loss = loss + multilevel["aux_weight"] * torch.stack(
+                [self._loss(l, labels, censorships, task_type) for l in subsets]).mean()
+        if multilevel["pairs"]:
+            kl = []
+            for child, parent in multilevel["pairs"]:
+                p_parent = self._event_distribution(parent.detach())
+                p_child = self._event_distribution(child)
+                kl.append((p_parent * (p_parent.log() - p_child.log())).sum(dim=-1).mean())
+            loss = loss + multilevel["consistency_weight"] * torch.stack(kl).mean()
+        return loss
 
     def _loss(self, outputs, labels, censorships, task_type):
         """Task loss of one batch (without the model specific terms added in training)."""
@@ -307,66 +352,68 @@ class ModelManager():
         return metrics_dict   
 
     def save_XA_attentions(self, batch, step_result, save_path, partition="test", epoch="last"):
+        """Saves every cross-attention map the model returned, att_<query>_to_<context> of shape
+        (B, heads, n_query, n_context): maps with the patches are split per slide along the patch axis
+        (<dataset>_<patient>_<slide>_<partition>_<epoch>_<key>.pt), the others are saved once per patient
+        (<dataset>_<patient>_<partition>_<epoch>_<key>.pt). Maps with the clinical tokens are saved as
+        {'attention', 'clinical_token_mask', 'clinical_tokens'}: which clinical variables the tokens are."""
         if "XA_attentions" not in step_result:
             return
         attentions = step_result['XA_attentions']
         slides_str_descriptors = batch['slides_str_descriptor']
         patient_ids = batch['patient_id']
         dataset_names = batch['dataset_name']
+        clinical_mask = attentions.get("clinical_token_mask")
+        clinical_names = self.config.data_loader.get("clinical_token_names")
         if not self.attention_dir_check:
-            if not os.path.exists(f"{save_path}/attention"):
-                os.makedirs(f"{save_path}/attention")
+            os.makedirs(f"{save_path}/attention", exist_ok=True)
             self.attention_dir_check = True
         for i, patient_id in enumerate(patient_ids):
-            dataset_name = dataset_names[i]
+            prefix = f"{save_path}/attention/{dataset_names[i]}_{patient_id}"
             for key, val in attentions.items():
-                if val is not None:
-                    slides = slides_str_descriptors[i].split("|")
-                    start = 0
-                    for slide in slides:
-                        slidename, num_patches = slide.split("#")
-                        num_patches = int(num_patches)
-                        if key == "att_genomics_to_patches":
-                            temp = val[i,:,:,start:start+num_patches].detach().cpu()
-                        elif key == "att_patches_to_genomics":
-                            temp = val[i,:,start:start+num_patches,:].detach().cpu()
-                        else:
-                            continue
-                        
-                        torch.save(temp, f"{save_path}/attention/{dataset_name}_{patient_id}_{slidename}_{partition}_{epoch}_{key}.pt")
-                        start += num_patches
+                if val is None or not key.startswith("att_") or "_to_" not in key:
+                    continue
+                query, context = key[len("att_"):].split("_to_", 1)
+                patch_axis = 2 if query == "patches" else 3 if context == "patches" else None
 
-    def adjust_status(self, data, scenario):
-        # return data
-        for status_key, modality_key in zip(["WSI_status", "genomics_status", "cnv_status"], ["WSI", "Genomics", "CNV"]):
-            if modality_key in self.config.model.kwargs.input_modalities:
-                # controllo se lo scenario è uno scenario in cui manca una sola modalità e se essa corrisponde a quella dello status_key corrente
-                # ----> devo impostaere le altre modalita a true, altrimenti rischio di avere tutte le modalità false
-                # QUINDI STO ASSUMENDO CHE DI DEFAULT AVREI TUTTE LE MODALITA' DISPONIBILI
-                if  '_miss_' in scenario: 
-                    if modality_key.lower() in scenario:
-                        data[status_key] = torch.tensor([data['missing_modality_test_scenarios'][scenario]])
-                    else:
-                        data[status_key] = torch.tensor([True])
-                    
-                        
-                # se mancano tutte le modalità
-                elif scenario.startswith('missing_all_'):
-                    rate = scenario.split('_')[-1]
-                    modality = modality_key.lower()
-                    scenario_modality = f'missing_all_{modality}_{rate}'
-                    prev = data[status_key].item() 
-                    data[status_key] = torch.tensor([data['missing_modality_test_scenarios'][scenario_modality]])
-                    if not prev and data[status_key].item():
-                        print('debug') 
+                def payload(attention):
+                    attention = attention.detach().cpu()
+                    if "clinical" in (query, context) and clinical_mask is not None:
+                        return {"attention": attention, "clinical_token_mask": clinical_mask[i].detach().cpu(),
+                                "clinical_tokens": clinical_names}
+                    return attention
+
+                if patch_axis is None:
+                    torch.save(payload(val[i]), f"{prefix}_{partition}_{epoch}_{key}.pt")
+                    continue
+                start = 0
+                for slide in slides_str_descriptors[i].split("|"):
+                    slidename, num_patches = slide.split("#")
+                    num_patches = int(num_patches)
+                    temp = val[i].narrow(patch_axis - 1, start, num_patches)  # val[i]: (heads, n_query, n_context)
+                    torch.save(payload(temp), f"{prefix}_{slidename}_{partition}_{epoch}_{key}.pt")
+                    start += num_patches
+
+    STATUS_KEYS = {"WSI": "WSI_status", "Genomics": "genomics_status", "CNV": "cnv_status",
+                   "CT": "ct_status", "MRI": "mri_status", "Clinical": "clinical_status"}
+
+    def adjust_status(self, data, scenario, modalities=None):
+        """Statuses of a missing modality test scenario: computed by the dataset as (patient has the modality)
+        and (the scenario keeps it), for every modality; a modality outside `modalities` (those of the
+        evaluated loader) stays missing."""
+        modalities = self.config.model.kwargs.input_modalities if modalities is None else modalities
+        scenario_status = data['missing_modality_test_scenarios']
+        for modality, status_key in self.STATUS_KEYS.items():
+            if modality in modalities and status_key in data:
+                data[status_key] = scenario_status[f"{scenario}/{modality}"].reshape(data[status_key].shape)
         return data
-    
+
     def step(self, batch, log_dict, task_type="Survival", device="cuda", model=None, eval_missing_modality_scenario=None, is_eval=False):
         batch_data = batch['input']
         if eval_missing_modality_scenario:
             is_eval = True
             batch_data = copy.deepcopy(batch['input'])
-            batch_data = self.adjust_status(batch_data, eval_missing_modality_scenario)
+            batch_data = self.adjust_status(batch_data, eval_missing_modality_scenario, self.eval_modalities)
             
         labels = batch['label'] #  check this casting        
         batch_data = move_to_device(batch_data, device)
@@ -396,6 +443,8 @@ class ModelManager():
             log_dict["all_event_times"]+=(labels.detach().view(-1).tolist())
             log_dict["all_original_event_times"]+=(batch["original_event_time"].detach().view(-1).tolist())
             log_dict["survival_predictions"] += outputs.detach().tolist()
+            if "risk_std" in result:   # predictive uncertainty of the risk (fusion_type poe)
+                log_dict.setdefault("risk_std", []).extend(result["risk_std"].detach().view(-1).tolist())
             if len(risk.shape) == 1:
                 risk = risk.reshape(-1,1)    
         elif task_type == "Treatment_Response":
@@ -417,6 +466,11 @@ class ModelManager():
         
         if model.__class__.__name__ in ["MUSE", "ProSurv"] and not is_eval:
             output['partial_loss'] = result["partial_loss"]
+        # model-specific training terms (e.g. OXA_MISS_final with fusion_type poe: KL + cross-modal predictor)
+        if "aux_loss" in result and not is_eval:
+            output['aux_loss'] = result["aux_loss"]
+        if "multilevel" in result and not is_eval:   # OXA_MISS_final radiology configurations
+            output['multilevel'] = result["multilevel"]
 
         if self.AEM_lamda > 0 and batch_data["WSI_status"].item() is True and 'attention' in result:            
             output['attention'] = result['attention']
@@ -461,8 +515,7 @@ class ModelManager():
             if STOP:
                 logging.info(f'STOPPED at epoch {epoch}')
                 break
-            logging.info('Starting epoch {}/{}, LR = {}'.format(epoch + 1, self.config.trainer.epochs,
-                                                                self.scheduler.get_last_lr()))
+            epoch_lr = self.scheduler.get_last_lr()   # learning rate of this epoch, printed in the train line
             tloss = []
             epoch_start = time.time()
 
@@ -495,6 +548,10 @@ class ModelManager():
                     loss = self._loss(outputs, labels, censorships, task_type)
                     if task_type == "Survival" and self.net.__class__.__name__ in ["MUSE", "ProSurv"]:
                         loss += step_result["partial_loss"]
+                    if "aux_loss" in step_result:
+                        loss = loss + step_result["aux_loss"]
+                    if "multilevel" in step_result:
+                        loss = loss + self._multilevel_loss(step_result["multilevel"], labels, censorships, task_type)
                     if task_type == "Treatment_Response" and self.AEM_lamda > 0:
                         attention = step_result['attention']
                         div_loss = torch.sum(F.softmax(attention, dim=-1) * F.log_softmax(attention, dim=-1))
@@ -522,8 +579,9 @@ class ModelManager():
             train_df = pd.DataFrame(log_dict)            
             train_metrics_dict = self.compute_metrics_df(train_df, task_type, per_dataset=False)
             train_metrics_df = pd.DataFrame(train_metrics_dict, index=[0])
+            lr_str = ", ".join(f"{lr:.2e}" for lr in epoch_lr)
             logging.info(f"Epoch {epoch + 1}/{self.config.trainer.epochs} train: " +
-                         self._summary(train_metrics_dict, tloss, time.time() - epoch_start, task_type))
+                         self._summary(train_metrics_dict, tloss, time.time() - epoch_start, task_type) + f", LR {lr_str}")
             if task_type == "Treatment_Response":
                 train_confusion_matrix = accuracy_confusionMatrix_plot(log_dict, train_metrics_df)
             # self.KaplanMeier_plot(log_dict, train_dataloader.dataset.dataset.bins.astype(int))
@@ -627,6 +685,9 @@ class ModelManager():
         
             if eval_dataloader is not None:
                 for checkpoint, model in zip([checkpoint_model_lowest_loss, checkpoint_model_highest_metric], [model_lowest_loss, model_highest_metric]):
+                    if model is None:  # e.g. validation c-index NaN at every epoch: no highest-metric model
+                        logging.warning(f"No model for {os.path.basename(checkpoint)} ({kfold}): not saved, not evaluated")
+                        continue
                     if kfold != "":
                         root, ext = os.path.splitext(checkpoint)
                         checkpoint = f"{root}{df_fold_suffix}{ext}"
@@ -647,7 +708,13 @@ class ModelManager():
                 eval_missing_modality_scenario=None,
                 print_demo_results=False,
                 is_demo_test=False,
-                repo_path=None):
+                repo_path=None,
+                test_modalities=None):
+        """test_modalities: the modalities of test_dataloader when they differ from the training ones: the
+        results are kept apart, under the scenario test_<modalities> (combined with a missing modality
+        scenario, if any)."""
+        test_tag = self.test_modalities_tag(test_modalities)
+        self.eval_modalities = list(test_modalities) if test_modalities is not None else None
         if not eval_missing_modality_scenario:
             eval_missing_modality_scenario_suffix = ""
         else:
@@ -683,22 +750,28 @@ class ModelManager():
         models.append(last_model)
         summary_paths.append('Last_Epoch_Model/Test')
 
+        if test_tag:
+            for i in range(len(summary_paths)):
+                summary_paths[i] += f"/Test_modalities/{test_tag}"
         if emms_suffix:
             for i, (model, summary_path) in enumerate(zip(models, summary_paths)):
                 summary_paths[i] += f"/Missing_modalities_scenarios/{eval_missing_modality_scenario}"        
 
-        scenario = eval_missing_modality_scenario if eval_missing_modality_scenario else "base"
+        scenario = '/'.join([p for p in (test_tag, eval_missing_modality_scenario) if p]) or "base"
+        scenario_suffix = "" if scenario == "base" else "_" + scenario.replace("/", "_")
         for model, summary_path in zip(models, summary_paths):
             model = model.to(device)
             model.eval()
             if hasattr(model, "return_xa_attentions") or model.__class__.__name__ == "OXA_MISS":
                 model.return_xa_attentions = Save_XA_attention_files
-            save_attentions = (lambda batch, step_result: self.save_XA_attentions(
-                batch, step_result, path, partition="test", epoch="best" if best else "last")) if Save_XA_attention_files else None
+            # one file per checkpoint and test scenario (the same name for all of them overwrote each other)
+            attention_tag = self.MODEL_VERSION_TAGS.get(summary_path.split("/")[0], summary_path.split("/")[0]) + scenario_suffix
+            save_attentions = (lambda batch, step_result, tag=attention_tag: self.save_XA_attentions(
+                batch, step_result, path, partition="test", epoch=tag)) if Save_XA_attention_files else None
             log_dict, tloss = self._run_eval(test_dataloader, task_type, device, model=model,
                                              scenario=eval_missing_modality_scenario, on_batch=save_attentions)
             test_df = pd.DataFrame(log_dict)
-            test_df_path = f"{path}/test_df_{df_fold_suffix}_{summary_path.split('/')[0]}.csv"
+            test_df_path = f"{path}/test_df_{df_fold_suffix}_{summary_path.split('/')[0]}{scenario_suffix}.csv"
             test_df.to_csv(test_df_path, index=False)
             print(f'Results saved in csv file: {test_df_path}')
             
@@ -706,6 +779,14 @@ class ModelManager():
             if task_type == "Survival":
                 test_metrics_dict["n_patients"] = len(test_df)
                 test_metrics_dict["n_events"] = int((test_df["all_censorships"] == 0).sum())
+                # Uno c-index, integrated Brier score, D-calibration (survival curves on the dataset's time bins)
+                edges = self.config.data_loader.get("survival_bins")
+                if edges is not None:
+                    reference = getattr(self, "reference_survival", None)
+                    test_metrics_dict.update(extended_survival_metrics(
+                        np.stack(test_df["survival_predictions"].values), test_df["all_censorships"].values,
+                        test_df["all_original_event_times"].values, edges,
+                        *(reference if reference is not None else (None, None))))
             logging.info(self._fold_summary(kfold, summary_path.split("/")[0], scenario, test_metrics_dict, task_type))
             if task_type == "Survival":
                 self._km_plot(test_df["all_original_event_times"], 1 - test_df["all_censorships"], test_df["all_risk_scores"],
@@ -716,7 +797,8 @@ class ModelManager():
                 model_version=summary_path.split("/")[0],
                 fold_result=test_metrics_dict,
                 fold_num=int(kfold.split('_')[1]) if kfold else 0,
-                predictions=test_df[["patient_ids", "dataset_name", "all_risk_scores", "all_censorships", "all_original_event_times"]]
+                predictions=test_df[["patient_ids", "dataset_name", "all_risk_scores", "all_censorships", "all_original_event_times",
+                                     "all_event_times", "survival_predictions"]]   # true time bin and hazard logits
                             if task_type == "Survival" else None,
             )
 
@@ -734,7 +816,7 @@ class ModelManager():
             if log_on_telegram:
                 from .telegram_logger import send_telegram_message
                 import asyncio
-            columns=["ID", "model_name", "dataset_name", "model_version", "End Time", "seed", "modality_setting", "internal_val_size", "input_modalities","test_scenario"]
+            columns=["ID", "model_name", "dataset_name", "model_version", "End Time", "seed", "modality_setting", "internal_val_size", "input_modalities", "test_modalities", "test_scenario"]
             for key, value in self.config.model.kwargs.items():
                 if key not in ["input_modalities"]:
                     columns.append(key)
@@ -821,7 +903,9 @@ class ModelManager():
                     "seed": self.config.seed,
                     "internal_val_size": self.config.data_loader.KFold.internal_val_size,
                     'modality_setting': modality_setting,
-                    'test_scenario': eval_missing_modality_scenario if eval_missing_modality_scenario else modality_setting,
+                    'test_scenario': scenario if scenario != "base" else modality_setting,
+                    'test_modalities': str(list(test_modalities) if test_modalities is not None
+                                           else self.config.model.kwargs.input_modalities).replace(" ", ""),
                 }
                 
                 if task_type == "Treatment_Response":
@@ -837,15 +921,15 @@ class ModelManager():
                     new_row['WSI_level_encoder_sizes'] = None
                     new_row['WSI_level_encoder_dropout'] = None
                     new_row['WSI_level_encoder_LayerNorm'] = None
-                    new_row['genomics_group_name'] = self.config.model.kwargs.genomics_group_name
-                    new_row['genomics_group_dropout'] = self.config.model.kwargs.genomics_group_dropout
-                    new_row['cnv_group_name'] = self.config.model.kwargs.cnv_group_name
-                    new_row['cnv_group_dropout'] = self.config.model.kwargs.cnv_group_dropout
-                    new_row['inner_dim'] = self.config.model.kwargs.inner_dim
-                    new_row['num_latent_queries'] = self.config.model.kwargs.num_latent_queries
-                    new_row['wsi_dropout'] = self.config.model.kwargs.wsi_dropout
-                    new_row['use_layernorm'] = self.config.model.kwargs.use_layernorm
-                    new_row['dropout'] = self.config.model.kwargs.dropout
+                    new_row['genomics_group_name'] = self.config.model.kwargs.get('genomics_group_name')
+                    new_row['genomics_group_dropout'] = self.config.model.kwargs.get('genomics_group_dropout')
+                    new_row['cnv_group_name'] = self.config.model.kwargs.get('cnv_group_name')
+                    new_row['cnv_group_dropout'] = self.config.model.kwargs.get('cnv_group_dropout')
+                    new_row['inner_dim'] = self.config.model.kwargs.get('inner_dim')
+                    new_row['num_latent_queries'] = self.config.model.kwargs.get('num_latent_queries')
+                    new_row['wsi_dropout'] = self.config.model.kwargs.get('wsi_dropout')
+                    new_row['use_layernorm'] = self.config.model.kwargs.get('use_layernorm')
+                    new_row['dropout'] = self.config.model.kwargs.get('dropout')
 
 
                 if task_type == "Treatment_Response":
@@ -860,8 +944,12 @@ class ModelManager():
                 if task_type == "Survival":
                     # c-index of the out-of-fold predictions of all folds together, overall and per dataset
                     for key, value in metrics.items():
-                        if key.endswith("c-index_pooled"):
+                        if key.endswith("c-index_pooled") or key == "cohort_gap":
                             new_row[key] = np.round(value, 3)
+                    for key in ["c-index_uno_mean", "c-index_uno_std", "IBS_mean", "IBS_std", "D-cal_p_mean", "D-cal_p_std",
+                                "D-cal_stat_mean", "D-cal_stat_std"]:
+                        if key in metrics:
+                            new_row[key] = np.round(metrics[key], 4)
                     for key in ["n_patients", "n_events"]:  # test patients / events over all folds
                         if key in metrics:
                             new_row[key] = metrics[key]
@@ -914,6 +1002,31 @@ class ModelManager():
             finally:
                 fcntl.flock(lock, fcntl.LOCK_UN)
         return records
+
+    def _log_time_bin_confusion(self, oof, key):
+        """Confusion matrices of the survival time bins (true bin vs most likely predicted bin of the discrete
+        event-time distribution), per fold and pooled over the folds, on the uncensored test patients (the bin
+        of a censored patient is unknown)."""
+        events = oof[oof["all_censorships"] == 0]
+        if events.empty or "survival_predictions" not in events:
+            return
+        logits = np.stack(events["survival_predictions"].values).astype(float)
+        hazards = 1 / (1 + np.exp(-logits))
+        survival_prev = np.concatenate([np.ones((len(hazards), 1)), np.cumprod(1 - hazards, axis=1)[:, :-1]], axis=1)
+        predicted = (survival_prev * hazards).argmax(axis=1)          # most likely event bin
+        true = events["all_event_times"].astype(int).values
+        n_bins = logits.shape[1]
+        edges = self.config.data_loader.get("survival_bins")
+        names = [f"bin {k + 1} ({edges[k]:.0f}-{edges[k + 1]:.0f} d)" if edges is not None and len(edges) == n_bins + 1
+                 else f"bin {k + 1}" for k in range(n_bins)]
+        charts = {f"{key}/pooled": wandb.plot.confusion_matrix(y_true=true.tolist(), preds=predicted.tolist(), class_names=names,
+                                                              title=f"time bins, pooled ({len(true)} events)")}
+        for fold in sorted(events["fold"].unique()):
+            sel = (events["fold"] == fold).values
+            charts[f"{key}/fold_{fold}"] = wandb.plot.confusion_matrix(
+                y_true=true[sel].tolist(), preds=predicted[sel].tolist(), class_names=names,
+                title=f"time bins, fold {fold} ({int(sel.sum())} events)")
+        wandb.log(charts)
 
     MODEL_VERSION_TAGS = {"Last_Epoch_Model": "last_epoch", "Lowest_Validation_Loss_Model": "lowest_val_loss",
                           "Highest_Validation_Metric_Model": "highest_val_metric"}
@@ -973,23 +1086,44 @@ class ModelManager():
                                         self.config.parent_directory, model_version, scenario, "aggregated", folds=oof["fold"])
                 metrics["km_logrank_p_pooled"] = p_value
                 wandb.run.summary[f"{prefix}/{tag}/km_logrank_p_pooled"] = p_value
+                self._log_time_bin_confusion(oof, f"{prefix}/{tag}/confusion_matrix")
             row = {"model": tag}
             if task_type == "Survival":
                 row["c-index (mean ± std)"] = f"{metrics['c-index_mean']:.3f} ± {metrics['c-index_std']:.3f}"
                 if "c-index_pooled" in metrics:
                     row["pooled"] = f"{metrics['c-index_pooled']:.3f}"
+                if "cohort_gap" in metrics:
+                    row["cohort gap"] = f"{metrics['cohort_gap']:+.3f}"
                 row["per fold"] = " ".join(f"{c:.3f}" for c in metrics["c-index_list"])
                 if "n_patients" in metrics:
                     row["patients"], row["events"] = metrics["n_patients"], metrics["n_events"]
                 if "km_logrank_p_pooled" in metrics:
                     row["KM log-rank p"] = f"{metrics['km_logrank_p_pooled']:.2e}"
+                for key, label in (("c-index_uno", "Uno c-index"), ("IBS", "IBS"), ("D-cal_p", "D-cal p"), ("D-cal_stat", "D-cal chi2")):
+                    if f"{key}_mean" in metrics:
+                        row[label] = f"{metrics[f'{key}_mean']:.3f} ± {metrics[f'{key}_std']:.3f}"
             else:
                 for m in ["AUC", "F1-Score", "Accuracy"]:
                     row[m] = f"{metrics[f'{m}_mean']:.3f} ± {metrics[f'{m}_std']:.3f}"
             rows.append(row)
         folds = self.results_store.fold_table(scenario)
+        suffix = "" if scenario == "base" else "_" + scenario.replace("/", "_")
         if len(folds):
             wandb.log({f"{prefix}/folds": wandb.Table(dataframe=folds)})
+            # also in the run folder: utils/ablation_analysis.py reads the per-fold metrics from here
+            folds.to_csv(os.path.join(self.config.parent_directory, f"results_folds{suffix}.csv"), index=False)
+        # averaged test results (mean +- std over the folds, pooled) of every model version, as one table
+        summary_rows = []
+        for model_version, metrics in aggregated_metrics.items():
+            row = {"model_version": self.MODEL_VERSION_TAGS.get(model_version, model_version)}
+            for key in sorted(metrics):
+                value = metrics[key]
+                if np.isscalar(value) and not key.endswith("_list") and not key.startswith(tuple(f"{d}_" for d in self.config.data_loader.get("dataset_names", []))):
+                    row[key] = float(value) if isinstance(value, (int, float, np.floating, np.integer)) else value
+            summary_rows.append(row)
+        if summary_rows:
+            wandb.log({f"{prefix}/summary": wandb.Table(dataframe=pd.DataFrame(summary_rows))})
+            pd.DataFrame(summary_rows).to_csv(os.path.join(self.config.parent_directory, f"results_summary{suffix}.csv"), index=False)
         header = f"RESULTS {self.net.__class__.__name__} | {self.get_dataset_name()} | " \
                  f"{'+'.join(self.config.model.kwargs.input_modalities)}" + (f" | scenario {scenario}" if scenario != "base" else "")
         table = pd.DataFrame(rows).to_string(index=False)

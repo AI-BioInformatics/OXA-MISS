@@ -22,6 +22,30 @@ To set up the environment required to run our model, please follow these steps:
     pip install -r requirements.txt
     ```
 
+## Running experiments
+
+Full guide: [docs/running_experiments.md](docs/running_experiments.md). Training runs only in SLURM jobs.
+
+- **Datasets** (tumors): `data_loader.datasets_configs`. Each dataset yaml has its own folds in
+  `parameters.kfold_splits`. With several datasets, fold *k* concatenates every dataset's `splits_<k>.csv`.
+- **Modalities**: `data_loader.modalities.{train, val, test}`. `test` can be a list of sets: each fold
+  trains once and is tested on every set. `val` and each test set must be subsets of `train`.
+- **Tumors × modalities grid**: the tumor names are in `config/datasets.yaml` (UNI for every tumor, UNIv2
+  for ccRCC/KIRC). CT/MRI encoders are in `config/radiology.yaml` (CT `mednet`/`suprem`, MRI
+  `mednet`/`mrseg`), chosen with `data_loader.radiology_encoders` or `--ct_encoder` / `--mri_encoder`.
+
+```bash
+# 1. versions: tumor combinations x training modality sets, each tested on all subsets of its modalities
+python grid_search/make_modality_grid.py --name pan --datasets ccRCC+KIRC ccRCC+KIRC+LUAD+LUSC \
+    --train all --test subsets
+# 2. one SLURM array, one task (k-fold training) per version
+python grid_search/run_grid_search.py --config config/OXA_MISS_ccRCC.yaml \
+    --versions grid_search/models_versions/pan.json --max_parallel 8
+```
+
+Results go to `experiments/test_results_csv/Surv_<model>.csv` (columns `dataset_name`, `input_modalities`,
+`test_modalities`, `test_scenario`) and to wandb.
+
 ## Demo
 
 We provide a demo code base to showcase how to execute a k-fold training (or test) of the model on the Overall Survival (OS) prediction task using a small set of data from the TCGA-KIRC dataset.

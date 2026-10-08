@@ -6,15 +6,21 @@ from copy import deepcopy
 from sklearn.preprocessing import StandardScaler
 from torch.utils.data import Dataset, DataLoader, Subset
 from .dataloader_utils import extract_names
+from .clinical_tokens import ClinicalTokens
+from .radiology_io import load_radiology_tokens
 import yaml
 from munch import munchify
 import json
 import glob
 import bisect
 import csv
+import re
 
 DEFAULT_CT_MAPPING = '/work/H2020DeciderFicarra/ccRCC/CT_mapping.csv'
 DEFAULT_MRI_MAPPING = '/work/H2020DeciderFicarra/ccRCC/MRI_mapping.csv'
+# patient id at the start of a radiology file name: TCGA (TCGA-AY-4070A.npz -> TCGA-AY-4070) or CPTAC
+CASE_ID_PATTERN = re.compile(r'(TCGA-[A-Z0-9]{2}-[A-Z0-9]{4}|C3[LN]-\d{5})')
+DEFAULT_RADIOLOGY_REGISTRY = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'config', 'radiology.yaml')
 
 
 
@@ -26,6 +32,7 @@ class Multimodal_Bio_Dataset(Dataset):
                         eps=1e-6,
                         sample=True,
                         load_slides_in_RAM=False,
+                        slides_cache_dtype="float32",
                         file_genes_group='D2_4/datasets/DECIDER_cohorts/Gene_expression/Expression/daria_mapped.json',
                         
                         genomics_group_name = ["high_refractory", "high_sensitive",  "hypoxia_pathway"],
@@ -38,18 +45,43 @@ class Multimodal_Bio_Dataset(Dataset):
                         input_modalities=['WSI', 'Genomics', 'CNV','CT'],
                         missing_modality_table=None,
                         model_name=None,
+                        radiology_encoders=None,
+                        radiology_registry=DEFAULT_RADIOLOGY_REGISTRY,
+                        clinical_tokens=None,
+                        radiology_tokens=False,
                         ):
         self.model_name = model_name
+        # radiology_tokens: CT / MRI as token matrices (N regions, dim) from the unpooled encoder outputs
+        # (radiology registry unpooled_root), for a model with its own radiology encoder (OXA_MISS_final);
+        # otherwise one mean-pooled vector per exam
+        self.radiology_tokens = radiology_tokens
+        # {CT: <encoder>, MRI: <encoder>} of config/radiology.yaml for all the datasets (None: the ct_path /
+        # mri_path of each dataset yaml)
+        self.radiology_encoders = dict(radiology_encoders or {})
+        if self.radiology_encoders:
+            with open(radiology_registry) as f:
+                self.radiology_registry = yaml.safe_load(f)
+            unknown = {m: e for m, e in self.radiology_encoders.items()
+                       if m not in self.radiology_registry['encoders'] or e not in self.radiology_registry['encoders'][m]}
+            if unknown:
+                raise ValueError(f"radiology_encoders {unknown} not in {radiology_registry}: {self.radiology_registry['encoders']}")
+        if radiology_tokens and not self.radiology_encoders and any(m in input_modalities for m in ('CT', 'MRI')):
+            raise ValueError("radiology_tokens needs data_loader.radiology_encoders (the unpooled features are found "
+                             "through config/radiology.yaml)")
         self.input_modalities = input_modalities
         self.missing_modality_test_scenarios = missing_modality_test_scenarios
         self.missing_mod_rate = missing_mod_rate
         self.use_missing_modalities_tables = use_missing_modalities_tables
-        if missing_modality_table is not None:
-            self.missing_modalities_table = pd.read_csv(missing_modality_table)
+        # missing modality tables: needed for the simulated missingness of training (missing_mod_rate) and for
+        # the test scenarios. One per dataset (missing_modalities_table_path of the dataset yaml); a table of
+        # the main config (missing_modality_table) is read first and has precedence
+        need_tables = use_missing_modalities_tables or len(missing_modality_test_scenarios) > 0
+        missing_table_paths = [missing_modality_table] if (need_tables and missing_modality_table) else []
         if use_missing_modalities_tables and not missing_mod_rate:
             raise ValueError("Missing modalities tables are enabled but missing_mod_rate is not set")
-        self.genomics_group_name = genomics_group_name
-        self.cnv_group_name = cnv_group_name
+        # None (e.g. a model without CNV, whose config has no cnv_group_name) = no group
+        self.genomics_group_name = list(genomics_group_name or [])
+        self.cnv_group_name = list(cnv_group_name or [])
         self.task_type = task_type
         self.load_slides_in_RAM = load_slides_in_RAM
         self.robust_training = False
@@ -58,6 +90,10 @@ class Multimodal_Bio_Dataset(Dataset):
         self.compact_missing_wsi = False
         if self.load_slides_in_RAM:
             self.slides_cache = {}
+        # dtype of the slides kept in RAM: float16 halves the cache; features go back to float32 per item
+        if slides_cache_dtype not in ("float32", "float16", "bfloat16"):
+            raise ValueError(f"slides_cache_dtype must be float32 / float16 / bfloat16, got {slides_cache_dtype}")
+        self.slides_cache_dtype = getattr(torch, slides_cache_dtype)
             
         # gene groups loaded once for all the datasets: each dataset's genomics then keeps only its genes
         # (intersection over the datasets). Reloading them per dataset kept only the last dataset's genes,
@@ -129,33 +165,12 @@ class Multimodal_Bio_Dataset(Dataset):
                 self.slide_id_name = self.datasets[config.name].slide_id_name
             dataframe = self.filter_by_tissue_type(config.name, dataframe, config.parameters.tissue_type_filter)                
             
-            if use_missing_modalities_tables:
-                if hasattr(config.parameters, 'missing_modalities_table_path'):
-                    missing_modalities_table = pd.read_csv(config.parameters.missing_modalities_table_path)
-                    if hasattr(self, 'missing_modalities_table'):
-                        new_rows = missing_modalities_table[~missing_modalities_table['case_id'].isin(self.missing_modalities_table['case_id'])]
-                        if not new_rows.empty:
-                            self.missing_modalities_table = pd.concat([self.missing_modalities_table, new_rows], ignore_index=True)
-                        self.missing_modalities_table["dataset_name"] = [config.name for _ in range(len(self.missing_modalities_table))]
-                        self.missing_modalities_table.rename(columns=rename_dict, inplace=True)
-                        if 'slide_id' in self.missing_modalities_table.columns:
-                            self.missing_modalities_table.drop(columns=['slide_id'],inplace=True)
-                        self.missing_modalities_table = self.missing_modalities_table.dropna()
-                        self.missing_modalities_table['time'] = self.missing_modalities_table['time'].astype(int)
-                        self.missing_modalities_table["dataset_name"] = [config.name for _ in range(len(self.missing_modalities_table))]
-                        self.missing_modalities_table.rename(columns=rename_dict, inplace=True)
-                                                
-                    else:
-                        self.missing_modalities_table = missing_modalities_table
-                        self.missing_modalities_table["dataset_name"] = [config.name for _ in range(len(self.missing_modalities_table))]
-                        self.missing_modalities_table.rename(columns=rename_dict, inplace=True)
-                        
-                        self.missing_modalities_table = self.missing_modalities_table.dropna()
-                        self.missing_modalities_table['time'] = self.missing_modalities_table['time'].astype(int)
-                        
-                else:
-                    raise ValueError("Missing modalities table path not found in dataset config file")
-            
+            if need_tables:
+                if not config.parameters.get('missing_modalities_table_path'):
+                    raise ValueError(f"Dataset {config.name}: no missing_modalities_table_path in its yaml "
+                                     f"(needed by missing_modalities_tables / missing_modality_test)")
+                missing_table_paths.append(config.parameters.missing_modalities_table_path)
+
             # CT/MRI/clinical sources are stored per dataset: each dataset config has its own feature folders,
             # so a single attribute would be overwritten by the last config in datasets_configs.
             # CT/MRI: <modality>_path is the features folder, <modality>_mapping_path (optional) the csv
@@ -163,13 +178,18 @@ class Multimodal_Bio_Dataset(Dataset):
             if not hasattr(self, 'ct_paths'):
                 self.ct_paths, self.mri_paths, self.clinical_data_per_dataset = {}, {}, {}
                 self.ct_exams, self.mri_exams = {}, {}
-            if hasattr(config.parameters,'ct_path'):
-                self.ct_paths[config.name]=config.parameters.ct_path
-                self.ct_exams[config.name]=self._read_exam_mapping(config.parameters.get('ct_mapping_path', DEFAULT_CT_MAPPING))
-
-            if hasattr(config.parameters,'mri_path'):
-                self.mri_paths[config.name]=config.parameters.mri_path
-                self.mri_exams[config.name]=self._read_exam_mapping(config.parameters.get('mri_mapping_path', DEFAULT_MRI_MAPPING))
+            for modality, paths, exams, default_mapping in [('CT', self.ct_paths, self.ct_exams, DEFAULT_CT_MAPPING),
+                                                            ('MRI', self.mri_paths, self.mri_exams, DEFAULT_MRI_MAPPING)]:
+                key = modality.lower()
+                if modality in self.radiology_encoders:
+                    # encoder of the run: the dataset's folder of that encoder, if it has one
+                    folder = self._radiology_folder(modality, config.name)
+                    if folder is not None:
+                        paths[config.name] = folder
+                        exams[config.name] = self._scan_exams(folder)
+                elif hasattr(config.parameters, f'{key}_path'):
+                    paths[config.name] = config.parameters[f'{key}_path']
+                    exams[config.name] = self._read_exam_mapping(config.parameters.get(f'{key}_mapping_path', default_mapping))
             if hasattr(config.parameters,'clinical_path'):
                 clinical_data=pd.read_csv(config.parameters.clinical_path)
                 CLINGEN_COLS = ['case_id','gender','age_diag','grade','cancer_history',
@@ -254,6 +274,15 @@ class Multimodal_Bio_Dataset(Dataset):
                     self.cnv = pd.concat([self.cnv, cnv], ignore_index=True)
                        
         
+        # clinical as tokens (data_loader.clinical: table, categorical, use_study_id, excluded_studies):
+        # availability and values from the clean table of all the studies, instead of the 14 columns of the
+        # dataset yamls' clinical_path
+        self.clinical_tokens = ClinicalTokens(**clinical_tokens) if clinical_tokens is not None else None
+
+        # study (dataset) and cancer type of each patient, as indices (module B adversary, probes)
+        self.study_names = list(self.datasets)
+        self.cancer_type_names = sorted({self.cancer_type(n) for n in self.study_names})
+
         self.max_patches = max_patches
         self.sample = sample
         self.n_bins = n_bins
@@ -262,53 +291,12 @@ class Multimodal_Bio_Dataset(Dataset):
         
         self._compute_patient_dict()
         self._compute_patient_df()
-        if use_missing_modalities_tables:
-            patient_df_temp = self.patient_df.reset_index(drop=True)
-            merged = pd.merge(
-            patient_df_temp,
-            self.missing_modalities_table,
-            left_on=self.case_id_name,
-            right_on='case_id',
-            how='left', # keep every patient of the label files, also those not in the missing modalities table
-            suffixes=('_x', '_y')
-)
-
-            for col in merged.columns:
-                if col.endswith('_x'):
-                    base_col = col[:-2]
-                    col_y = base_col + '_y'
-                    if col_y in merged.columns:
-                        if merged[col].equals(merged[col_y]):
-                            merged = merged.drop(columns=[col_y])  # drop _y
-                            merged = merged.rename(columns={col: base_col})  # rename _x → base
-                        else:
-                            temp = merged[col].combine_first(merged[col_y])
-                            # sono diverse, lasciale entrambe
-                            # continue
-                            # Se dopo il combine_first è uguale a una delle due colonne, vuol dire che differivano solo per i NaN
-                            if temp.equals(merged[col]) or temp.equals(merged[col_y]):
-                                merged[base_col] = temp
-                                merged = merged.drop(columns=[col, col_y])
-                            else:
-                                # Ci sono vere differenze → lascio entrambe
-                                continue
-            self.patient_df = merged       
-            self.patient_df = self.patient_df.set_index(self.case_id_name, drop=False)
-            
-            missing_dataset_name = self.patient_df['dataset_name'].isna().sum()
-            if missing_dataset_name > 0:
-                print(f"[❗] Found {missing_dataset_name} rows with missing 'dataset_name'")
-            most_common_name = self.patient_df['dataset_name'].dropna().mode()[0]
-            self.patient_df['dataset_name'] = self.patient_df['dataset_name'].fillna(most_common_name)
-            nan_counts = self.patient_df.isna().sum()
-            nan_counts = nan_counts[nan_counts > 0]
-
-            if not nan_counts.empty:
-                print("[❗] Found NaN values after merge:")
-                print(nan_counts)
+        if need_tables:
+            self._merge_missing_modality_tables(missing_table_paths)
         # --- patient-first: keep every patient with at least one available input modality ---
         self._compute_modality_availability()
         self._filter_patients_by_modalities()
+        self._compute_sites()
 
         ############################
         # maybe wrap this into a function
@@ -329,20 +317,138 @@ class Multimodal_Bio_Dataset(Dataset):
         print("Dataset loaded with {} patients{}".format(len(self.patient_df), wsi_info))
 
 
+    # columns of a missing modality table: True = the modality is kept for the patient in that setting
+    MISSING_TABLE_COLUMN = re.compile(r'^(complete|[a-z]+_miss_\d+|missing_all_[a-z]+_\d+)$')
+    STATUS_MODALITIES = ["WSI", "Genomics", "CNV", "CT", "MRI", "Clinical"]
+
+    def _merge_missing_modality_tables(self, paths):
+        """Adds the mask columns of the missing modality tables to patient_df (by case_id). A patient missing
+        from the tables keeps every modality (its columns are True); a case_id in two tables keeps the first."""
+        tables = []
+        for path in paths:
+            table = pd.read_csv(path, dtype={'case_id': str})
+            columns = [c for c in table.columns if self.MISSING_TABLE_COLUMN.match(c)]
+            table = table[['case_id'] + columns].copy()
+            table['case_id'] = table['case_id'].astype(str).str.strip()
+            tables.append(table)
+        table = pd.concat(tables, ignore_index=True).drop_duplicates('case_id', keep='first').set_index('case_id')
+        columns = list(table.columns)
+        merged = self.patient_df.drop(columns=[c for c in columns if c in self.patient_df.columns]).join(table, how='left')
+        not_in_tables = merged[columns].isna().all(axis=1) if columns else pd.Series(False, index=merged.index)
+        if not_in_tables.any():
+            print(f"[❗] {int(not_in_tables.sum())} patients not in the missing modality tables: they keep every modality, "
+                  f"e.g. {list(merged.index[not_in_tables][:5])}")
+        merged[columns] = merged[columns].fillna(True).astype(bool)
+        self.patient_df = merged
+        self.missing_table_columns = set(columns)
+
+    def _table_keeps(self, row, setting, modality):
+        """False if the missing modality setting (training missing_mod_rate or test scenario) removes `modality`
+        for this patient: <modality>_miss_<rate> removes only that modality, missing_all_<rate> any of them."""
+        if setting in (None, '', 'complete'):
+            return True
+        m = modality.lower()
+        if setting.startswith('missing_all_'):
+            column = f"missing_all_{m}_{setting.rsplit('_', 1)[1]}"
+        elif '_miss_' in setting:
+            if setting.split('_miss_')[0] != m:
+                return True
+            column = setting
+        else:
+            raise ValueError(f"missing modality setting {setting}: expected complete, <modality>_miss_<rate> or missing_all_<rate>")
+        if column not in self.missing_table_columns:
+            raise ValueError(f"missing modality tables have no column {column} (setting {setting}, modality {modality})")
+        return bool(row[column])
+
+    def _train_keeps(self, row, modality):
+        """Simulated missingness of training (missing_modalities_tables.active / missing_mod_rate)."""
+        return not self.use_missing_modalities_tables or self._table_keeps(row, self.missing_mod_rate, modality)
+
+    MIN_SITE_PATIENTS = 5
+    TCGA_SITE = re.compile(r'^TCGA-([A-Z0-9]{2})-')
+
+    def _compute_sites(self):
+        """Acquisition site of each patient (module B adversary, target "site"): the TCGA tissue source site
+        (TCGA-<site>-<patient> barcode); a non-TCGA dataset (e.g. CPTAC) is one site. Sites with fewer than
+        MIN_SITE_PATIENTS patients are merged per cancer type into <cancer>_other_sites."""
+        raw = {}
+        for pid, name in zip(self.patient_df.index, self.patient_df["dataset_name"]):
+            match = self.TCGA_SITE.match(str(pid))
+            raw[pid] = f"TCGA-{match.group(1)}" if match else name
+        counts = pd.Series(raw).value_counts()
+        self.site_of = {pid: site if counts[site] >= self.MIN_SITE_PATIENTS
+                        else f"{self.cancer_type(self.patient_df.loc[pid, 'dataset_name'])}_other_sites"
+                        for pid, site in raw.items()}
+        self.site_names = sorted(set(self.site_of.values()))
+        self.site_index_of = {site: i for i, site in enumerate(self.site_names)}
+
+    @staticmethod
+    def cancer_type(dataset_name):
+        """Cancer type of a dataset name: CPTAC (ccRCC) -> KIRC, TCGA_<X>[RED] -> X."""
+        return "KIRC" if dataset_name == "CPTAC" else dataset_name.replace("TCGA_", "").replace("RED", "")
+
     @staticmethod
     def _read_exam_mapping(path):
         mapping = pd.read_csv(path, dtype={'case_id': str})
         return mapping.drop_duplicates('case_id').set_index('case_id')['chosen_exam']
 
+    def _radiology_folder(self, modality, dataset_name):
+        """<root>/<encoder folder>/<tumor folder> of config/radiology.yaml, None if the dataset has none."""
+        registry = self.radiology_registry
+        tumor = registry['tumor_folders'].get(dataset_name)
+        if tumor is None:
+            return None
+        root = registry['unpooled_root'] if self.radiology_tokens else registry['root']
+        folder = os.path.join(root, registry['encoders'][modality][self.radiology_encoders[modality]], tumor)
+        return folder if os.path.isdir(folder) else None
+
+    def _scan_exams(self, folder):
+        """case_id -> exam file of a features folder (<case_id>.<ext>, or <case_id><suffix>.<ext>, e.g.
+        TCGA-AY-4070A; .pt token matrices with radiology_tokens, else .npz mean-pooled vectors). One exam per
+        patient: a patient with several files is an error (they would need a mapping csv)."""
+        ext = '.pt' if self.radiology_tokens else '.npz'
+        files = sorted(f for f in os.listdir(folder) if f.endswith(ext))
+        exams = {}
+        for f in files:
+            match = CASE_ID_PATTERN.match(f)
+            case = match.group(1) if match else f[:-len(ext)]
+            if case in exams:
+                raise ValueError(f"{folder}: several exams for {case} ({exams[case]}, {f}): use a mapping csv")
+            exams[case] = f
+        return pd.Series(exams, dtype=object)
+
+    def _radiology_dim(self, modality):
+        """Embedding size of the CT / MRI features of the run (read once from a file of each dataset; they
+        must agree: one encoder per run)."""
+        if not hasattr(self, '_radiology_dims'):
+            self._radiology_dims = {}
+        if modality not in self._radiology_dims:
+            paths, exams = (self.ct_paths, self.ct_exams) if modality == 'CT' else (self.mri_paths, self.mri_exams)
+            dims = {}
+            for name, folder in paths.items():
+                files = [e for e in exams[name].values if os.path.exists(os.path.join(folder, e))]
+                if files and self.radiology_tokens:
+                    dims[name] = int(load_radiology_tokens(os.path.join(folder, files[0])).shape[-1])
+                elif files:
+                    dims[name] = int(np.load(os.path.join(folder, files[0]))['arr_0'].size)
+            if len(set(dims.values())) > 1:
+                raise ValueError(f"{modality} features of different size across datasets (different encoders?): {dims}")
+            self._radiology_dims[modality] = next(iter(dims.values())) if dims else 512
+        return self._radiology_dims[modality]
+
+    def _radiology_features(self, modality, dataset_name, case_id):
+        """Features of a patient's CT / MRI exam, read from disk: with radiology_tokens the raw unpooled encoder
+        output (N regions, dim), pooled by the model's trainable attention pooling; else the (1, dim) mean-pooled
+        vector."""
+        paths, exams = (self.ct_paths, self.ct_exams) if modality == 'CT' else (self.mri_paths, self.mri_exams)
+        path = os.path.join(paths[dataset_name], exams[dataset_name][case_id])
+        if self.radiology_tokens:
+            return load_radiology_tokens(path)
+        return torch.from_numpy(np.squeeze(np.load(path)['arr_0'], axis=(1, 3)))
+
     def _placeholder_shape(self, modality, dataset_name):
-        """Shape of the zero features of a missing CT/MRI, matching the encoder of the configured features."""
-        paths = self.ct_paths if modality == 'CT' else self.mri_paths
-        if len(paths) == 0:
-            return (1, 512)
-        path = paths.get(dataset_name) or next(iter(paths.values()))
-        if 'mednet' in path:
-            return (1, 2048)
-        return (1, 768) if modality == 'CT' else (1, 320)
+        """Shape of the zero features of a missing CT/MRI: the embedding size of the run's features."""
+        return (1, self._radiology_dim(modality))
 
     def _wsi_feature_dim(self, dataset_name):
         """Patch feature size of the WSI of a dataset (read once from one of its .pt files)."""
@@ -440,8 +546,11 @@ class Multimodal_Bio_Dataset(Dataset):
             return out
         df["has_CT"] = imaging_available(self.ct_paths, self.ct_exams)
         df["has_MRI"] = imaging_available(self.mri_paths, self.mri_exams)
-        df["has_Clinical"] = [ds in self.clinical_data_per_dataset and p in self.clinical_data_per_dataset[ds].index
-                              for p, ds in zip(pids, datasets)]
+        if self.clinical_tokens is not None:
+            df["has_Clinical"] = [self.clinical_tokens.has(p) for p in pids]
+        else:
+            df["has_Clinical"] = [ds in self.clinical_data_per_dataset and p in self.clinical_data_per_dataset[ds].index
+                                  for p, ds in zip(pids, datasets)]
 
     def _filter_patients_by_modalities(self):
         """Keeps the patients with at least one of the input modalities (SurvPath: WSI and genomics)."""
@@ -464,6 +573,18 @@ class Multimodal_Bio_Dataset(Dataset):
         # labelled patients left out because they have none of the input modalities (reported per split)
         self.patients_without_input_modalities = set(self.patient_df.index[~keep])
         self.patient_df = self.patient_df[keep]
+
+    def patients_with_modalities(self, patients, modalities):
+        """The patients (same order) of the dataset with at least one of `modalities` (SurvPath: WSI and
+        Genomics). Used per partition: train / val / test can use different modalities of the run."""
+        patients = np.asarray(patients)
+        df = self.patient_df.reindex(patients)
+        if self.model_name == 'SurvPath':
+            keep = df["has_WSI"].fillna(False).astype(bool) & df["has_Genomics"].fillna(False).astype(bool)
+        else:
+            cols = [f"has_{m}" for m in modalities if f"has_{m}" in df.columns]
+            keep = df[cols].fillna(False).astype(bool).any(axis=1) if cols else pd.Series(False, index=df.index)
+        return patients[keep.to_numpy()]
 
     def _compute_patient_df(self):
         in_datasets = self.dataframe.groupby(self.case_id_name)["dataset_name"].nunique()
@@ -560,9 +681,11 @@ class Multimodal_Bio_Dataset(Dataset):
             for slide_id in self.slides_on_disk[pid]:
                 if slide_id not in self.slides_cache:
                     wsi_bag = torch.load(self._slide_path(pt_files_path, slide_id), weights_only=True, map_location="cpu")
+                    wsi_bag = wsi_bag.to(self.slides_cache_dtype)
                     self.slides_cache[slide_id] = wsi_bag
                     total_bytes += wsi_bag.element_size() * wsi_bag.nelement()
-        print(f"Preloaded {len(self.slides_cache)} slides in RAM ({total_bytes / 1024**3:.1f} GB)")
+        print(f"Preloaded {len(self.slides_cache)} slides in RAM as {str(self.slides_cache_dtype).replace('torch.', '')} "
+              f"({total_bytes / 1024**3:.1f} GB)")
 
     def _load_wsi_embs_from_path(self, dataset_name, slide_names):
             """
@@ -588,6 +711,7 @@ class Multimodal_Bio_Dataset(Dataset):
                         num_patches = wsi_bag.shape[0]
                     else:
                         wsi_bag = torch.load(self._slide_path(pt_files_path, slide_id), weights_only=True, map_location="cpu")
+                        wsi_bag = wsi_bag.to(self.slides_cache_dtype)
                         self.slides_cache[slide_id] = wsi_bag
                         num_patches = wsi_bag.shape[0]
                 else:
@@ -603,7 +727,7 @@ class Multimodal_Bio_Dataset(Dataset):
 
                 n_samples = min(patch_features.shape[0], max_patches)
                 idx = np.sort(np.random.choice(patch_features.shape[0], n_samples, replace=False))
-                patch_features = patch_features[idx, :]
+                patch_features = patch_features[idx, :].float()   # float16 cache -> float32 after sampling
                 
             
                 # make a mask 
@@ -619,6 +743,7 @@ class Multimodal_Bio_Dataset(Dataset):
                     mask = torch.concat([torch.zeros([original]), torch.ones([how_many_to_add])])
             
             else:
+                patch_features = patch_features.float()
                 mask = torch.zeros([patch_features.shape[0]])
 
             return patch_features, mask, slides_str_descriptor
@@ -637,7 +762,11 @@ class Multimodal_Bio_Dataset(Dataset):
         self.robust_training = False
 
     def __getitem__(self, index):
-        # Retrieve data from the dataframe based on the index
+        return self.get_item(index, self.input_modalities)
+
+    def get_item(self, index, modalities):
+        """Data of a patient with only `modalities` (a subset of the run modalities, self.input_modalities):
+        the other modalities are returned as missing (zero placeholder, status False)."""
         row  = self.patient_df.loc[index]
         # every modality starts as missing, with a zero placeholder of the same shape of the real features
         ct_feats = torch.zeros(self._placeholder_shape('CT', row["dataset_name"]), dtype=torch.float32)
@@ -647,87 +776,64 @@ class Multimodal_Bio_Dataset(Dataset):
         if isinstance(row, pd.DataFrame):
             print("⚠️ Più righe trovate con index, uso solo la prima:")
             row = row.iloc[0]
-        if self.use_missing_modalities_tables and \
-            (('wsi' in self.missing_mod_rate and not row[self.missing_mod_rate]) or \
-             (self.missing_mod_rate.startswith('missing_all_') and not row[f'missing_all_wsi_{self.missing_mod_rate.split("_")[-1]}'])):
-            WSI_status = False
-        else:
-            WSI_status = True
-        if (hasattr(self, 'normalized_genomics') and index not in self.normalized_genomics.index) or not hasattr(self, 'normalized_genomics'): # or (self.use_missing_modalities_tables and not row[self.missing_mod_rate]):          
-           genomics = {key: torch.zeros(self.genes_groups[key].get("count", 0)) for key in self.genomics_group_name}
-           genomics_status = False
-        else:
-            
-            genomics = {}
-            if hasattr(self, 'GE_selected_gene_set'):
-                row_i = self.genomics_arrays['rows'][index]
-                for key in self.genomics_group_name:
-                    genomics[key] = torch.from_numpy(self.genomics_arrays['arrays'][key][row_i].copy())
-                # In questo modo genomics_status è False se in train stiamo utilizzando 
-                # una condizione di missing modality simulata,
-                # ma la genomica viene caricata lo stesso cosi se il paziente finisce in test puo essere 
-                # utilizzata nei missing modalities scenarios
-                if self.use_missing_modalities_tables and \
-                    (('genomics' in self.missing_mod_rate and not row[self.missing_mod_rate]) or \
-                     (self.missing_mod_rate.startswith('missing_all_') and not row[f'missing_all_genomics_{self.missing_mod_rate.split("_")[-1]}'])):
-                    genomics_status = False
-                else:
-                    genomics_status = True
-            else:
-                genomics_status = False
-        if (hasattr(self, 'normalized_cnv') and index not in self.normalized_cnv.index) or not hasattr(self, 'normalized_cnv'):
-            cnv = {key: torch.zeros(self.genes_groups[key].get("count", 0)) for key in self.cnv_group_name}
-            cnv_status = False
-        else:
-            cnv = {}
-            if hasattr(self, 'CNV_selected_gene_set'):
-                row_i = self.cnv_arrays['rows'][index]
-                for key in self.cnv_group_name:
-                    cnv[key] = torch.from_numpy(self.cnv_arrays['arrays'][key][row_i].copy())
-                # cnv_status = True
-                if self.use_missing_modalities_tables and \
-                    (('cnv' in self.missing_mod_rate and not row[self.missing_mod_rate]) or\
-                     (self.missing_mod_rate.startswith('missing_all_') and not row[f'missing_all_cnv_{self.missing_mod_rate.split("_")[-1]}'])):
-                    cnv_status = False
-                else:
-                    cnv_status = True
-            else:
-                cnv_status = False
         dataset_name = row["dataset_name"]
-        # availability (has_*) is computed once at init, on the data of the patient's own dataset
-        if 'CT' in self.input_modalities and row["has_CT"]:
-            ct_sample = os.path.join(self.ct_paths[dataset_name], self.ct_exams[dataset_name][index])
-            ct_feats = torch.from_numpy(np.squeeze(np.load(ct_sample)['arr_0'], axis=(1,3)))
-            ct_status = True
-        if 'MRI' in self.input_modalities and row["has_MRI"]:
-            mri_sample = os.path.join(self.mri_paths[dataset_name], self.mri_exams[dataset_name][index])
-            mri_feats = torch.from_numpy(np.squeeze(np.load(mri_sample)['arr_0'], axis=(1,3)))
-            mri_status = True
-        if 'Clinical' in self.input_modalities and row["has_Clinical"]:
-            clinical_feats = torch.tensor(self.clinical_data_per_dataset[dataset_name].loc[index].values.astype(np.float32))
-            clinical_status = True
-        if self.robust_training:
-            if WSI_status and genomics_status:
-                # 66% chance to remove WSI or genomics
-                if np.random.rand() < 0.66:
-                    if np.random.rand() < 0.5:
-                        # remove WSI
-                        WSI_status = False
-                    else:
-                        # remove genomics
-                        genomics_status = False
-
-        # if self.patient_df.loc[index].case_id== 'TCGA-BP-4341':
-        #     print("DEBUG: Trovato paziente TCGA-BP-4341! Controlla")
         slide_list = self.slides_on_disk[row[self.case_id_name]]  # already filtered on disk (and by tissue type)
-        if len(slide_list) == 0 or not 'WSI' in self.input_modalities:
-            WSI_status = False
+        # available = the patient has the modality and it is a modality of this loader; the data of an available
+        # modality are always loaded, also when a simulated missingness removes it (the test scenarios use it)
+        available = {
+            "WSI": 'WSI' in modalities and len(slide_list) > 0,
+            "Genomics": 'Genomics' in modalities and hasattr(self, 'normalized_genomics') and hasattr(self, 'GE_selected_gene_set')
+                        and index in self.normalized_genomics.index,
+            "CNV": 'CNV' in modalities and hasattr(self, 'normalized_cnv') and hasattr(self, 'CNV_selected_gene_set')
+                   and index in self.normalized_cnv.index,
+            "CT": 'CT' in modalities and bool(row["has_CT"]),
+            "MRI": 'MRI' in modalities and bool(row["has_MRI"]),
+            "Clinical": 'Clinical' in modalities and bool(row["has_Clinical"]),
+        }
+        if available["Genomics"]:
+            row_i = self.genomics_arrays['rows'][index]
+            genomics = {key: torch.from_numpy(self.genomics_arrays['arrays'][key][row_i].copy()) for key in self.genomics_group_name}
+        else:
+            genomics = {key: torch.zeros(self.genes_groups[key].get("count", 0)) for key in self.genomics_group_name}
+        if available["CNV"]:
+            row_i = self.cnv_arrays['rows'][index]
+            cnv = {key: torch.from_numpy(self.cnv_arrays['arrays'][key][row_i].copy()) for key in self.cnv_group_name}
+        else:
+            cnv = {key: torch.zeros(self.genes_groups[key].get("count", 0)) for key in self.cnv_group_name}
+        # availability (has_*) is computed once at init, on the data of the patient's own dataset
+        if available["CT"]:
+            ct_feats = self._radiology_features('CT', dataset_name, index)
+        if available["MRI"]:
+            mri_feats = self._radiology_features('MRI', dataset_name, index)
+        clinical_inputs = {}
+        if self.clinical_tokens is not None:
+            # raw values (age standardized in the model); missing / not a modality of this loader -> zeros
+            clinical_inputs = self.clinical_tokens.get(index) if available["Clinical"] else self.clinical_tokens.missing()
+            clinical_inputs.pop("clinical_status")
+        elif available["Clinical"]:
+            clinical_feats = torch.tensor(self.clinical_data_per_dataset[dataset_name].loc[index].values.astype(np.float32))
+        if available["WSI"]:
+            patch_features, mask, slides_str_descriptor = self._load_wsi_embs_from_path(dataset_name, slide_list)
+        else:
             n_placeholder = 1 if self.compact_missing_wsi else self.max_patches
             patch_features = torch.zeros((n_placeholder, self._wsi_feature_dim(dataset_name)))
             mask = torch.zeros(n_placeholder)
             slides_str_descriptor = ""
-        else:
-            patch_features, mask, slides_str_descriptor = self._load_wsi_embs_from_path(dataset_name, slide_list)
+
+        # status = available and kept by the simulated missingness of training (missing_mod_rate; as before it
+        # applies to every loader: the base evaluation is in the training setting)
+        status = {m: available[m] and self._train_keeps(row, m) for m in self.STATUS_MODALITIES}
+        if self.robust_training:
+            if status["WSI"] and status["Genomics"]:
+                # 66% chance to remove WSI or genomics
+                if np.random.rand() < 0.66:
+                    if np.random.rand() < 0.5:
+                        status["WSI"] = False
+                    else:
+                        status["Genomics"] = False
+        WSI_status, genomics_status, cnv_status = status["WSI"], status["Genomics"], status["CNV"]
+        ct_status, mri_status, clinical_status = status["CT"], status["MRI"], status["Clinical"]
+
         label = row['label']
         if self.task_type == "Survival":
             censorship = row["censorship"]
@@ -738,24 +844,11 @@ class Multimodal_Bio_Dataset(Dataset):
             time = torch.tensor(0)
             label_names = ["treatment_response"]
 
-        
-        
-        missing_modality_test_scenarios_dict = {}
-        for scenario in self.missing_modality_test_scenarios:
-            if '_miss_' in scenario:
-                if row[scenario]:
-                    missing_modality_test_scenarios_dict[scenario] = True
-                else:
-                    missing_modality_test_scenarios_dict[scenario] = False
-            elif scenario.startswith('missing_all_'):
-                rate = scenario.split('_')[-1]
-                for modality in self.input_modalities:
-                    modality = modality.lower()
-                    scenario_modality = f'missing_all_{modality}_{rate}'
-                    if row[scenario_modality]:
-                        missing_modality_test_scenarios_dict[scenario_modality] = True
-                    else:
-                        missing_modality_test_scenarios_dict[scenario_modality] = False
+        # statuses of each test scenario: available and kept by the scenario (independent of the training
+        # setting); read by ModelManager.adjust_status
+        missing_modality_test_scenarios_dict = {
+            f"{scenario}/{m}": available[m] and self._table_keeps(row, scenario, m)
+            for scenario in self.missing_modality_test_scenarios for m in self.STATUS_MODALITIES}
 
         data = {
                 'input':{   
@@ -772,7 +865,11 @@ class Multimodal_Bio_Dataset(Dataset):
                             'mri_status': mri_status,
                             "clinical_features": clinical_feats,
                             "clinical_status": clinical_status,
+                            **clinical_inputs,
                             'missing_modality_test_scenarios': missing_modality_test_scenarios_dict,
+                            'study_index': self.study_names.index(dataset_name),
+                            'cancer_type_index': self.cancer_type_names.index(self.cancer_type(dataset_name)),
+                            'site_index': self.site_index_of[self.site_of[row[self.case_id_name]]],
                             'label': label, 
                             'censorship': censorship,
                         }, 
