@@ -1,11 +1,13 @@
 """
 Clinical data as tokens (OXA_MISS_final), from the clean table of all the studies
-(clinical_data_clean/all_studies_clinical_clean.csv: one row per case_id, NaN for every missing value).
+(clinical_data/all_studies_clinical_clean.csv: one row per case_id, NaN for every missing value).
 
   numerical:   age, given RAW to the model: its z-score uses the training patients' mean / std of each fold,
                stored in the model (set_clinical_normalization), so a checkpoint is self-contained
   categorical: fixed vocabulary (same in every fold, no fit), index 0 = missing
-  study_id:    optional categorical token (use_study_id): the study / cancer type of the patient
+  study_id:    optional categorical token (use_study_id): the study of the patient (TCGA_KIRC != CPTAC_CCRCC)
+  cancer_type: optional categorical token (use_cancer_type): the harmonized cancer type (TCGA code, the
+               dataloader's mapping: TCGA_KIRC and CPTAC_CCRCC -> KIRC), shared by the cohorts of a tumour
 
 Configured by data_loader.clinical in the main yaml; with it, Clinical availability (has_Clinical) comes from
 this table instead of the clinical_path of the dataset yamls.
@@ -14,7 +16,7 @@ import numpy as np
 import pandas as pd
 import torch
 
-CLEAN_CSV = "/work/H2020DeciderFicarra/ccRCC/clinical_data_clean/all_studies_clinical_clean.csv"
+CLEAN_CSV = "/work/H2020DeciderFicarra/ccRCC/clinical_data/all_studies_clinical_clean.csv"
 
 # Fixed vocabulary. After the cleaning every category has >= 100 patients over the 9 studies.
 # race / ethnicity are not in the default: missing for 64% (CPTAC ethnicity) / 28% (KIRC) with a pattern that
@@ -40,7 +42,7 @@ class ClinicalTokens:
     """case_id -> raw numerical values, their mask and the categorical indices of a patient."""
     DEFAULT_CATEGORICAL = DEFAULT_CAT_COLS
 
-    def __init__(self, table=CLEAN_CSV, categorical=DEFAULT_CAT_COLS, use_study_id=False,
+    def __init__(self, table=CLEAN_CSV, categorical=DEFAULT_CAT_COLS, use_study_id=False, use_cancer_type=False,
                  excluded_studies=DEFAULT_EXCLUDED_STUDIES):
         df = pd.read_csv(table, dtype={"case_id": str})
         if not df["case_id"].is_unique:
@@ -56,8 +58,13 @@ class ClinicalTokens:
         if use_study_id:
             self.cat_cols.append("study_id")
             vocab["study_id"] = studies
+        if use_cancer_type:
+            from .dataloader_multidataset import Multimodal_Bio_Dataset
+            df["cancer_type"] = df["study_id"].map(lambda s: Multimodal_Bio_Dataset.cancer_type(s) if isinstance(s, str) else np.nan)
+            self.cat_cols.append("cancer_type")
+            vocab["cancer_type"] = sorted({Multimodal_Bio_Dataset.cancer_type(s) for s in studies})
         self.cat_cardinalities = [len(vocab[c]) for c in self.cat_cols]
-        self.use_study_id = use_study_id
+        self.use_study_id, self.use_cancer_type = use_study_id, use_cancer_type
 
         num = df[NUM_COLS].apply(pd.to_numeric, errors="coerce").to_numpy(dtype=np.float32)
         num_mask = ~np.isnan(num)
@@ -68,8 +75,8 @@ class ClinicalTokens:
             if out_of_vocab.any():  # fail instead of silently treating them as missing
                 raise ValueError(f"{c}: values out of vocabulary {sorted(df.loc[out_of_vocab, c].unique())}")
             cat[:, j] = mapped.fillna(0).astype(np.int64).to_numpy()
-        # a patient has Clinical if at least one real clinical value is observed (the study token is not one)
-        n_real = len(self.cat_cols) - int(use_study_id)
+        # a patient has Clinical if at least one real clinical value is observed (the study / cancer tokens are not)
+        n_real = len(self.cat_cols) - int(use_study_id) - int(use_cancer_type)
         observed = num_mask.any(axis=1) | (cat[:, :n_real] > 0).any(axis=1)
         self.num = np.where(num_mask, num, 0.0).astype(np.float32)
         self.num_mask, self.cat = num_mask, cat

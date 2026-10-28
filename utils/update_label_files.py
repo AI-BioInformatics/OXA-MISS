@@ -1,55 +1,75 @@
 """
-Build updated OS label files that include every patient with an OS label and at least
-one available modality (WSI, genomics, CT, MRI, clinical), not only patients with a WSI.
+Build the OS label files of every cohort (dataloader/dataset_updated/<DATASET>_labels.csv) from scratch.
 
-Existing rows of the label files are kept unchanged, except: CPTAC patients with a known non-ccRCC
-histology are removed; patients with follow-up <= 0 days get the OS found in another source
-(OS_OVERRIDES) or are removed. New patients are appended with:
-  - one row per WSI found on disk (union of all feature extractors), or
-  - a single row with an empty slide_id when the patient has no WSI.
+A patient is in the label file if it has a valid OS (event known, follow-up > 0 days, possibly from OS_OVERRIDES)
+and at least one available modality of the dataset yaml (config/<DATASET>_dataset.yaml):
+    WSI       UNIv2 feature files (.h5 / .pt) of the yaml's pt_files_path: diagnostic FFPE slides only
+              (TCGA DX slides at 20x equivalent, CPTAC FFPE tumour slides)
+    Genomics  rows of the yaml's genomics_path
+    CT / MRI  token features of config/radiology.yaml (default encoders suprem / mrseg)
+    Clinical  rows of the clean clinical table with at least one observed variable
+Rows: one per WSI of the patient, or a single row with an empty slide_id when the patient has no WSI.
 
-OS for new patients is taken from the same source that reproduces the existing labels
-of each cohort (checked and printed at run time):
-  - CPTAC:            CPTAC-3.clinical.tsv (days_to_death if dead, else max days_to_last_follow_up)
-  - TCGA, CDR cohorts: TCGA-CDR Supplemental Table S1 (OS, OS.time)
-  - TCGA, cBio cohorts: cBioPortal PanCancer clinical (Overall Survival months * 30.4375)
+OS sources (ccRCC/docs):
+    TCGA   TCGA-CDR Supplemental Table S1 (OS, OS.time) or cBioPortal PanCanAtlas (Overall Survival months *
+           30.4375), per cohort the source that reproduces the earlier label files (TCGA_COHORTS); PAAD, UCEC: CDR
+    CPTAC  CPTAC-3.clinical.tsv (STAD: the same GDC fields, CPTAC_CLINICAL_FILES): days_to_death if dead, else the
+           max days_to_last_follow_up; patients restricted to the cohort's primary site / disease type
+           (CPTAC_COHORTS); CCRCC also to ccRCC histology
+Patients without a valid OS in the source keep the OS of the earlier label files (ccRCC/docs/OS_previous_label_files_*.csv,
+curated from the original label files); OS_OVERRIDES always apply. The OS provenance is in the audit (os_source), and
+the agreement with the earlier label files is printed per cohort.
 
-Label file convention (same as dataloader/dataset/): Survival = 1 -> Dead (event).
-Use `event_name: "Survival"` in the dataset yaml.
+Label file convention: Survival = 1 -> Dead (event); `event_name: "Survival"` in the dataset yaml.
 
-Usage:
-    python utils/update_label_files.py [--out dataloader/dataset_updated]
+Usage (reads the genomics and feature folders of every cohort: run it on a compute node):
+    python utils/update_label_files.py [--out dataloader/dataset_updated] [--datasets TCGA_PAAD CPTAC_UCEC]
 """
 import argparse
 import glob
 import os
+import re
 
 import numpy as np
 import pandas as pd
 import yaml
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-CCRCC = '/work/H2020DeciderFicarra/ccRCC'
-TCGA_SHARED = '/work/h2020deciderficarra_shared/TCGA'
-LABELS_DIR = os.path.join(REPO, 'dataloader', 'dataset')
+DOCS = '/work/H2020DeciderFicarra/ccRCC/docs'
+CPTAC3_CLINICAL = f'{DOCS}/CPTAC-3.clinical.tsv'
+CBIO_CLINICAL = f'{DOCS}/TCGA_clinical_data_COMPLETE.tsv'
+TCGA_CDR = f'{DOCS}/TCGA-CDR-SupplementalTableS1.xlsx'
+# OS of the label files before the 2026-10-26 rebuild (curated from the original label files + OS_OVERRIDES)
+PREVIOUS_OS = f'{DOCS}/OS_previous_label_files_2026-10-26.csv'
+CLINICAL_TABLE = '/work/H2020DeciderFicarra/ccRCC/clinical_data/all_studies_clinical_clean.csv'
+CLINICAL_VARS = ['age', 'sex', 'race', 'ethnicity', 'ajcc_stage', 'ajcc_t', 'ajcc_n', 'ajcc_m']
+RADIOLOGY_REGISTRY = os.path.join(REPO, 'config', 'radiology.yaml')
+RADIOLOGY_ENCODERS = {'CT': 'suprem', 'MRI': 'mrseg'}
+CASE_ID_PATTERN = re.compile(r'(TCGA-[A-Z0-9]{2}-[A-Z0-9]{4}|C3[LN]-\d{5})')
 
-CT_MAPPING = f'{CCRCC}/CT_mapping.csv'
-MRI_MAPPING = f'{CCRCC}/MRI_mapping.csv'
-CPTAC3_CLINICAL = f'{CCRCC}/CPTAC-3.clinical.tsv'
-CBIO_CLINICAL = f'{CCRCC}/TCGA_clinical_data_COMPLETE.tsv'
-TCGA_CDR = f'{CCRCC}/TCGA-CDR-SupplementalTableS1.xlsx'
-
-# cohort -> OS source reproducing the existing label file
+# TCGA cohort -> OS source reproducing the earlier label files
 TCGA_COHORTS = {
-    'BLCA': 'cdr', 'BRCA': 'cdr', 'COAD': 'cdr', 'HNSC': 'cdr', 'OV': 'cdr', 'STAD': 'cdr',
+    'BLCA': 'cdr', 'BRCA': 'cdr', 'COAD': 'cdr', 'HNSC': 'cdr', 'OV': 'cdr', 'STAD': 'cdr', 'PAAD': 'cdr', 'UCEC': 'cdr',
     'KIRC': 'cbio', 'KIRP': 'cbio', 'LIHC': 'cbio', 'LUAD': 'cbio', 'LUSC': 'cbio',
 }
+# CPTAC cohort -> (primary_site, disease_type) of CPTAC-3.clinical.tsv; None = any disease type of the site.
+CPTAC_COHORTS = {
+    'CCRCC': ('Kidney', None),
+    'LSCC': ('Bronchus and lung', 'Squamous Cell Neoplasms'),
+    'LUAD': ('Bronchus and lung', 'Adenomas and Adenocarcinomas'),
+    'PDA': ('Pancreas', None),
+    'UCEC': ('Uterus, NOS', None),
+    'STAD': ('Stomach', None),
+}
+# CPTAC cohort -> clinical file, when not CPTAC3_CLINICAL. STAD is not in CPTAC-3.clinical.tsv: same GDC fields
+# (CPTAC-3, primary site stomach, 165 cases) downloaded from the GDC API on 2026-10-26, same columns.
+CPTAC_CLINICAL_FILES = {'STAD': f'{DOCS}/CPTAC-3_STAD.clinical_GDC_2026-10-26.tsv'}
 # CPTAC-3 kidney cohort also contains non-ccRCC tumours: keep ccRCC (8312/3) and unknown histology
-CPTAC_MORPHOLOGY_KEEP = {'8312/3', 'Unknown'}
+CCRCC_MORPHOLOGY_KEEP = {'8312/3', 'Unknown'}
 
 LABEL_COLS = ['case_id', 'slide_id', 'True_Label', 'FUT', 'Survival']
 
-# Patients whose follow-up in the label files is <= 0 days but a usable time was found in another source
+# Patients whose follow-up in the sources is <= 0 days but a usable time was found in another source
 # (search of 2026-09-30 over local tables, GDC API release 46, cBioPortal API, PDC API, LinkedOmics and the
 #  CPTAC ccRCC papers: dataloader/dataset_updated/audit/patients_without_valid_OS.csv). case_id -> (event, days, source)
 # Rule agreed with the user: alive patients are censored at the latest date they were known alive;
@@ -80,48 +100,59 @@ def read_ids(path):
     return set(pd.read_csv(path, usecols=[0]).iloc[:, 0].astype(str))
 
 
-def wsi_on_disk(pt_dirs, case_id_len):
-    """slide_id -> case_id for every .pt file in the given folders."""
+def case_of(name):
+    m = CASE_ID_PATTERN.match(name)
+    return m.group(1) if m else None
+
+
+# ------------------------------------------------------------------ modalities
+def wsi_on_disk(folder):
+    """slide_id -> case_id of every WSI feature file (.npy / .h5 / .pt) of the folder."""
     slides = {}
-    for d in pt_dirs:
-        if not os.path.isdir(d):
-            continue
-        for f in os.listdir(d):
-            if f.endswith('.pt'):
-                slides[f[:-3]] = f[:case_id_len]
+    if os.path.isdir(folder):
+        for f in os.listdir(folder):
+            if f.endswith(('.npy', '.h5', '.pt')):
+                stem = os.path.splitext(f)[0]
+                if case_of(stem):
+                    slides[stem] = case_of(stem)
     return pd.Series(slides, dtype=str)
 
 
-def imaging_on_disk(mapping, folder):
-    if folder is None or not os.path.isdir(folder):
-        return set()
-    return {r.case_id for r in mapping.itertuples() if os.path.exists(os.path.join(folder, r.chosen_exam))}
+def radiology_on_disk(dataset_name):
+    """modality -> case_ids with a token file of the default encoder (config/radiology.yaml)."""
+    reg = yaml.safe_load(open(RADIOLOGY_REGISTRY))
+    tumor = reg['tumor_folders'].get(dataset_name)
+    out = {}
+    for m, enc in RADIOLOGY_ENCODERS.items():
+        folder = os.path.join(reg['root'], reg['encoders'][m][enc], tumor) if tumor else None
+        ids = set()
+        if folder and os.path.isdir(folder):
+            ids = {case_of(f) for f in os.listdir(folder) if f.endswith('.pt') and case_of(f)}
+        out[m] = ids
+    return out
 
 
-def yaml_params(pattern):
-    """Merge modality paths of all dataset yamls matching pattern (e.g. several extractors)."""
-    params = {}
-    for f in sorted(glob.glob(os.path.join(REPO, 'config', pattern))):
-        p = yaml.safe_load(open(f))['parameters']
-        for k in ['pt_files_path', 'genomics_path', 'cnv_path', 'ct_path', 'mri_path', 'clinical_path']:
-            if k in p:
-                params.setdefault(k, set()).add(p[k])
-    return params
+def clinical_on_disk(table, dataset_name):
+    t = table[table.study_id == dataset_name]
+    return set(t.loc[t[CLINICAL_VARS].notna().any(axis=1), 'case_id'].astype(str))
 
 
 # ------------------------------------------------------------------ OS sources
-def cptac_os():
-    c = pd.read_csv(CPTAC3_CLINICAL, sep='\t', low_memory=False)
-    c = c[c.primary_site == 'Kidney']
+def cptac_os(cohort):
+    site, disease = CPTAC_COHORTS[cohort]
+    c = pd.read_csv(CPTAC_CLINICAL_FILES.get(cohort, CPTAC3_CLINICAL), sep='\t', low_memory=False)
+    c = c[c.primary_site == site]
+    if disease is not None:
+        c = c[c.disease_type == disease]
     g = c.groupby('submitter_id').agg(
         vital=('vital_status.demographic', lambda s: set(s.dropna())),
-        dtd=('days_to_death.demographic', 'max'),
-        dlf=('days_to_last_follow_up.diagnoses', 'max'),
-        morphology=('morphology.diagnoses', 'first'),
-        diagnosis=('primary_diagnosis.diagnoses', 'first'))
+        dtd=('days_to_death.demographic', lambda s: pd.to_numeric(s, errors='coerce').max()),
+        dlf=('days_to_last_follow_up.diagnoses', lambda s: pd.to_numeric(s, errors='coerce').max()),
+        morphology=('morphology.diagnoses', 'first'))
     g['event'] = g.vital.map(lambda v: 1.0 if 'Dead' in v else (0.0 if 'Alive' in v else np.nan))
     g['time'] = np.where(g.event == 1, g.dtd, g.dlf)
-    return g[['time', 'event', 'morphology', 'diagnosis']]
+    keep = g.morphology.isin(CCRCC_MORPHOLOGY_KEEP) if cohort == 'CCRCC' else pd.Series(True, index=g.index)
+    return g[['time', 'event']], keep
 
 
 def tcga_os(cohort, source, cdr, cbio):
@@ -135,31 +166,46 @@ def tcga_os(cohort, source, cdr, cbio):
                          'event': c['Overall Survival Status'].astype(str).str[0].map({'1': 1.0, '0': 0.0})})
 
 
-# ------------------------------------------------------------------ per dataset
-def build(name, label_file, os_table, slides, modalities, out_dir, keep_mask=None):
-    labels = pd.read_csv(os.path.join(LABELS_DIR, label_file), sep='\t', dtype=str)
-    removed = []
-    if keep_mask is not None:
-        # existing patients with a histology different from the cohort's one are removed too
-        # (patients not found in the histology source are kept)
-        drop = keep_mask.reindex(labels.case_id.unique())
-        removed = sorted(drop[drop == False].index)
-        labels = labels[~labels.case_id.isin(removed)]
-    # follow-up <= 0 days is not a valid survival time: use the OS found elsewhere, otherwise remove the patient
-    overridden = sorted(set(labels.case_id) & set(OS_OVERRIDES))
-    for pid in overridden:
+def apply_overrides(os_table):
+    os_table = os_table.copy()
+    used = sorted(set(OS_OVERRIDES) & set(os_table.index))
+    for pid in used:
         event, days, _ = OS_OVERRIDES[pid]
-        rows = labels.case_id == pid
-        labels.loc[rows, 'FUT'] = f'{float(days):.1f}'
-        labels.loc[rows, 'Survival'] = str(event)
-        labels.loc[rows, 'True_Label'] = 'Dead' if event == 1 else 'Alive'
-    non_positive = sorted(labels.loc[pd.to_numeric(labels.FUT, errors='coerce') <= 0, 'case_id'].unique())
-    labels = labels[~labels.case_id.isin(non_positive)]
-    labeled = set(labels.case_id)
+        os_table.loc[pid, ['event', 'time']] = [float(event), float(days)]
+    missing = {p: v for p, v in OS_OVERRIDES.items() if p not in os_table.index}
+    for pid, (event, days, _) in missing.items():
+        os_table.loc[pid, ['event', 'time']] = [float(event), float(days)]
+    return os_table
 
-    universe = sorted(set(slides.values) | set().union(*modalities.values()) | labeled)
+
+# ------------------------------------------------------------------ per dataset
+def previous_os(previous_table, name):
+    """OS of the earlier label files of the dataset (curated from the original label files), None if absent."""
+    if not previous_table or not os.path.exists(previous_table):
+        return None
+    old = pd.read_csv(previous_table, dtype=str)
+    old = old[old.dataset == name].drop_duplicates('case_id').set_index('case_id')
+    if old.empty:
+        return None
+    return pd.DataFrame({'time': pd.to_numeric(old.FUT, errors='coerce'), 'event': pd.to_numeric(old.Survival, errors='coerce')})
+
+
+def build(name, os_table, slides, modalities, out_dir, previous_dir, keep=None):
+    # OS: the cohort's source, then the earlier label files (PREVIOUS_OS) for the patients the source has no valid OS for,
+    # then OS_OVERRIDES (always). os_source records where each patient's OS comes from.
+    os_table = os_table.copy()
+    os_table['os_source'] = 'source'
+    valid = lambda t: t.time.notna() & t.event.notna() & (t.time > 0)
+    prev = previous_os(previous_dir, name)
+    if prev is not None:
+        fill = prev.index[valid(prev)].difference(os_table.index[valid(os_table)])
+        os_table = os_table.reindex(os_table.index.union(fill))
+        os_table.loc[fill, ['time', 'event']] = prev.loc[fill, ['time', 'event']].values
+        os_table.loc[fill, 'os_source'] = 'previous label file'
+    os_table = apply_overrides(os_table)
+    os_table.loc[os_table.index.isin(list(OS_OVERRIDES)), 'os_source'] = 'override'
+    universe = sorted(set(slides.values) | set().union(*modalities.values()))
     audit = pd.DataFrame(index=pd.Index(universe, name='case_id'))
-    audit['in_labels'] = audit.index.isin(labeled)
     audit['WSI'] = audit.index.isin(set(slides.values))
     for m, ids in modalities.items():
         audit[m] = audit.index.isin(ids)
@@ -167,99 +213,73 @@ def build(name, label_file, os_table, slides, modalities, out_dir, keep_mask=Non
     audit['n_modalities'] = audit[mod_cols].sum(axis=1)
     audit = audit.join(os_table)
     audit['has_OS'] = audit.time.notna() & audit.event.notna() & (audit.time > 0)
-
-    # check that the OS source reproduces the existing labels
-    first = labels.drop_duplicates('case_id').set_index('case_id')
-    chk = first.join(os_table, how='inner')
-    t_ok = ((chk.FUT.astype(float) - chk.time).abs() <= 1).sum()
-    e_ok = (chk.Survival.astype(float) == chk.event).sum()
-
-    new = audit[~audit.in_labels]
-    reason = pd.Series('added', index=new.index)
-    reason[new.n_modalities == 0] = 'no modality'
-    reason[~new.has_OS] = 'no valid OS'
-    if keep_mask is not None:
-        reason[~keep_mask.reindex(new.index).fillna(False).astype(bool) & (reason == 'added')] = 'excluded histology'
-    audit.loc[new.index, 'status'] = reason
-    audit.loc[audit.in_labels, 'status'] = 'existing'
-    added = reason[reason == 'added'].index
+    status = pd.Series('included', index=audit.index)
+    status[~audit.has_OS] = 'no valid OS'
+    if keep is not None:
+        histology_ok = keep.reindex(audit.index).astype(object).where(lambda x: x.notna(), True).astype(bool)
+        status[(status == 'included') & ~histology_ok] = 'excluded histology'
+    audit['status'] = status
+    included = audit.index[status == 'included']
 
     rows = []
-    for pid in added:
+    for pid in included:
         r = audit.loc[pid]
         event = int(r.event)
         base = {'case_id': pid, 'True_Label': 'Dead' if event == 1 else 'Alive',
                 'FUT': f'{float(r.time):.1f}', 'Survival': str(event)}
-        pid_slides = sorted(slides[slides == pid].index)
-        for s in pid_slides or ['']:
+        for s in sorted(slides[slides == pid].index) or ['']:
             rows.append(dict(base, slide_id=s))
-    updated = pd.concat([labels[LABEL_COLS], pd.DataFrame(rows, columns=LABEL_COLS)], ignore_index=True)
+    labels = pd.DataFrame(rows, columns=LABEL_COLS)
+    label_file = f'{name}_labels.csv'
+    labels.to_csv(os.path.join(out_dir, label_file), sep='\t', index=False)
+    audit.to_csv(os.path.join(out_dir, 'audit', f'{name}_audit.csv'))
 
-    os.makedirs(out_dir, exist_ok=True)
-    updated.to_csv(os.path.join(out_dir, label_file), sep='\t', index=False)
-    audit.to_csv(os.path.join(out_dir, 'audit', label_file.replace('_labels.csv', '_audit.csv')))
-
-    added_df = audit.loc[added]
-    print(f'\n### {name}  ({label_file})')
-    print(f'  OS source check on existing patients: time {t_ok}/{len(chk)}, event {e_ok}/{len(chk)} '
-          f'({len(first) - len(chk)} existing patients not in source)')
-    if removed:
-        print(f'  existing patients removed (histology): {removed}')
-    if overridden:
-        print(f'  OS replaced (follow-up was <= 0 days): ' + ', '.join(f'{p} -> {OS_OVERRIDES[p][2]}' for p in overridden))
-    if non_positive:
-        print(f'  existing patients removed (follow-up <= 0 days, no OS found elsewhere): {len(non_positive)}')
-    print(f'  patients: existing {len(labeled)} + added {len(added)} = {len(labeled) + len(added)}'
-          f'  | rows {len(labels)} -> {len(updated)}')
-    print(f'  added patients by modality: ' +
-          ', '.join(f'{m} {int(added_df[m].sum())}' for m in mod_cols) +
-          f'  | without WSI: {int((~added_df.WSI).sum())}')
-    skipped = reason[reason != 'added'].value_counts().to_dict()
-    if skipped:
-        print(f'  not added: {skipped}')
+    inc = audit.loc[included]
+    print(f'\n### {name}: {len(included)} patients ({int(inc.event.sum())} deaths), {len(labels)} rows, '
+          f'{int((labels.slide_id != "").sum())} WSI')
+    print('  patients with modality: ' + ', '.join(f'{m} {int(inc[m].sum())}' for m in mod_cols))
+    print(f'  not included: {status[status != "included"].value_counts().to_dict()} | OS from: '
+          f'{inc.os_source.value_counts().to_dict()}')
+    old = previous_os(previous_dir, name)
+    if old is not None:
+        common = old.index.intersection(inc.index)
+        t_ok = int(((old.loc[common, 'time'] - inc.loc[common, 'time']).abs() <= 1).sum())
+        e_ok = int((old.loc[common, 'event'] == inc.loc[common, 'event']).sum())
+        print(f'  vs previous label file: {len(old)} -> {len(inc)} patients (kept {len(common)}, dropped '
+              f'{len(old.index.difference(inc.index))}, new {len(inc.index.difference(old.index))}); '
+              f'OS equal on kept: time {t_ok}/{len(common)}, event {e_ok}/{len(common)}')
     return audit
+
+
+def dataset_params(name):
+    return yaml.safe_load(open(os.path.join(REPO, 'config', f'{name}_dataset.yaml')))['parameters']
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--out', default=os.path.join(REPO, 'dataloader', 'dataset_updated'))
+    ap.add_argument('--previous', default=PREVIOUS_OS,
+                    help='OS of the earlier label files (dataset, case_id, FUT, Survival): fallback OS and agreement report')
+    ap.add_argument('--datasets', nargs='+', default=None, help='default: every TCGA and CPTAC cohort with an OS source')
     args = ap.parse_args()
     os.makedirs(os.path.join(args.out, 'audit'), exist_ok=True)
-
-    ct_map, mri_map = pd.read_csv(CT_MAPPING), pd.read_csv(MRI_MAPPING)
-    ccrcc_clinical = read_ids(f'{CCRCC}/multi-modal-ist.github.io/datasets/ccRCC/Code/clinical+genomic_split.csv')
-
-    # ---------------- CPTAC ccRCC
-    p = yaml_params('ccRCC.yaml')
-    cos = cptac_os()
-    mods = {
-        'Genomics': set().union(*[read_ids(x) for x in p['genomics_path']]),
-        'CT': set().union(*[imaging_on_disk(ct_map, x) for x in p.get('ct_path', [])]),
-        'MRI': set().union(*[imaging_on_disk(mri_map, x) for x in p.get('mri_path', [])]),
-        'Clinical': {x for x in ccrcc_clinical if x.startswith('C3')} | set(cos.index),
-    }
-    build('CPTAC ccRCC', 'CPTAC_CCRCC_labels.csv', cos[['time', 'event']],
-          wsi_on_disk(p['pt_files_path'], 9), mods, args.out,
-          keep_mask=cos.morphology.isin(CPTAC_MORPHOLOGY_KEEP))
-
-    # ---------------- TCGA
-    cdr = pd.read_excel(TCGA_CDR, sheet_name=0)
-    cbio = pd.read_csv(CBIO_CLINICAL, sep='\t', low_memory=False)
-    for cohort, source in TCGA_COHORTS.items():
-        p = yaml_params(f'TCGA_{cohort}_dataset*.yaml')
-        pt_dirs = set(glob.glob(f'{TCGA_SHARED}/{cohort}/features_*/pt_files')) | p.get('pt_files_path', set())
-        ge = p.get('genomics_path', {f'{TCGA_SHARED}/{cohort}/gene_expression/fpkm_unstranded.csv'})
-        mods = {'Genomics': set().union(*[read_ids(x) for x in ge])}
-        if 'cnv_path' in p:
-            mods['CNV'] = set().union(*[read_ids(x) for x in p['cnv_path']])
-        if 'ct_path' in p:
-            mods['CT'] = set().union(*[imaging_on_disk(ct_map, x) for x in p['ct_path']])
-        if 'mri_path' in p:
-            mods['MRI'] = set().union(*[imaging_on_disk(mri_map, x) for x in p['mri_path']])
-        if 'clinical_path' in p:
-            mods['Clinical'] = {x for x in set().union(*[read_ids(x) for x in p['clinical_path']]) if x.startswith('TCGA')}
-        build(f'TCGA {cohort} (OS: {source})', f'TCGA_{cohort}_labels.csv', tcga_os(cohort, source, cdr, cbio),
-              wsi_on_disk(pt_dirs, 12), mods, args.out)
+    names = args.datasets or [f'TCGA_{c}' for c in TCGA_COHORTS] + [f'CPTAC_{c}' for c in CPTAC_COHORTS]
+    clinical = pd.read_csv(CLINICAL_TABLE, low_memory=False)
+    cdr = cbio = None
+    for name in names:
+        p = dataset_params(name)
+        mods = {'Genomics': read_ids(p['genomics_path']), **radiology_on_disk(name),
+                'Clinical': clinical_on_disk(clinical, name)}
+        slides = wsi_on_disk(p['pt_files_path'])
+        if name.startswith('TCGA_'):
+            cohort = name[len('TCGA_'):]
+            if cdr is None:
+                cdr = pd.read_excel(TCGA_CDR, sheet_name=0)
+                cbio = pd.read_csv(CBIO_CLINICAL, sep='\t', low_memory=False)
+            build(name, tcga_os(cohort, TCGA_COHORTS[cohort], cdr, cbio), slides, mods, args.out, args.previous)
+        else:
+            os_table, keep = cptac_os(name[len('CPTAC_'):])
+            build(name, os_table, slides, mods, args.out, args.previous, keep=keep)
 
 
 if __name__ == '__main__':

@@ -47,12 +47,12 @@ warnings.filterwarnings("ignore")
 ROOT = "/work/H2020DeciderFicarra/ccRCC"
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # dataset yamls of the cohorts (ccRCC base config + pancancer8, grid_search/make_ablation_grid.py)
-DATASET_YAMLS = [f"{REPO}/config/ccRCC.yaml"] + [f"{REPO}/config/TCGA_{c}_dataset_UNI.yaml" for c in
-                                                 ("KIRC", "BLCA", "COAD", "KIRP", "LIHC", "LUAD", "LUSC", "STAD")]
-PANCANCER8 = ["TCGA_KIRC", "TCGA_BLCA", "TCGA_COADRED", "TCGA_KIRP", "TCGA_LIHC", "TCGA_LUAD", "TCGA_LUSC",
+DATASET_YAMLS = [f"{REPO}/config/CPTAC_CCRCC_dataset.yaml"] + [f"{REPO}/config/TCGA_{c}_dataset.yaml" for c in
+                                                             ("KIRC", "BLCA", "COAD", "KIRP", "LIHC", "LUAD", "LUSC", "STAD")]
+PANCANCER8 = ["TCGA_KIRC", "TCGA_BLCA", "TCGA_COAD", "TCGA_KIRP", "TCGA_LIHC", "TCGA_LUAD", "TCGA_LUSC",
               "TCGA_STAD"]
-POOLS = {"pooled ccRCC (CPTAC + KIRC)": ["CPTAC", "TCGA_KIRC"], "pooled pancancer8": PANCANCER8}
-CLEAN = f"{ROOT}/clinical_data_clean/all_studies_clinical_clean.csv"
+POOLS = {"pooled ccRCC (CPTAC + KIRC)": ["CPTAC_CCRCC", "TCGA_KIRC"], "pooled pancancer8": PANCANCER8}
+CLEAN = f"{ROOT}/clinical_data/all_studies_clinical_clean.csv"
 RAW_TCGA = f"{ROOT}/TCGA_clinical_data_COMPLETE.tsv"
 RAW_CPTAC = f"{ROOT}/CPTAC-3.clinical.tsv"
 SELECTED = ["age", "sex", "ajcc_stage", "ajcc_t", "ajcc_n", "ajcc_m"]   # data_loader.clinical of the model

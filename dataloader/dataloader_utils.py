@@ -1,4 +1,4 @@
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader, Subset, WeightedRandomSampler
 from torch import Generator
 import numpy as np
 
@@ -82,9 +82,28 @@ def partition_modalities(config, dataset):
     return modalities
 
 
+SAMPLERS = ("uniform", "cancer_balanced", "cancer_sqrt")
+
+
+def cancer_sampler(dataset, patients, mode, generator):
+    """Training sampler (data_loader.sampler): uniform -> None (shuffle, every patient once per epoch);
+    cancer_balanced -> every cancer type drawn with the same probability; cancer_sqrt -> probability of a cancer
+    type proportional to the square root of its size (in between). Both draw len(patients) patients per epoch
+    with replacement (WeightedRandomSampler)."""
+    if mode not in SAMPLERS:
+        raise ValueError(f"data_loader.sampler {mode}: one of {list(SAMPLERS)}")
+    if mode == "uniform":
+        return None
+    cancer = dataset.patient_df.loc[patients, "dataset_name"].map(dataset.cancer_type).to_numpy()
+    _, inverse, counts = np.unique(cancer, return_inverse=True, return_counts=True)
+    per_patient = counts[inverse].astype(np.float64)
+    weights = 1.0 / per_patient if mode == "cancer_balanced" else 1.0 / np.sqrt(per_patient)
+    return WeightedRandomSampler(weights.tolist(), num_samples=len(patients), replacement=True, generator=generator)
+
+
 def make_dataloader(dataset, partition, patients, modalities, config, train=False):
     """DataLoader of the given patients (None -> None) with only `modalities`; patients not in the dataset,
-    or with none of `modalities`, are left out. Training: shuffled (fixed seed), full batches only.
+    or with none of `modalities`, are left out. Training: shuffled (seeded by config.seed), full batches only.
     Validation / test: in order, batch of one patient when test_sample is False (all patches of a patient,
     variable size)."""
     if patients is None:
@@ -102,18 +121,25 @@ def make_dataloader(dataset, partition, patients, modalities, config, train=Fals
         raise ValueError(f"No {partition} patients with any of {list(modalities)} (of {len(requested)} in the split): "
                          f"none of the datasets {list(dataset.datasets)} has these modalities?")
     generator = None
+    sampler = None
     if train:
+        # training order (shuffle / sampler) from the run's seed: different seeds see different orders
         generator = Generator()
-        generator.manual_seed(42)
+        generator.manual_seed(int(config.get('seed', 42)))
+        sampler = cancer_sampler(dataset, patients, config.data_loader.get('sampler', 'uniform'), generator)
     return DataLoader(ModalitySubset(dataset, patients, modalities),
                       batch_size=config.data_loader.batch_size if train else eval_batch_size,
-                      shuffle=train,
+                      shuffle=train and sampler is None,
+                      sampler=sampler,
                       generator=generator,
                       drop_last=train,
                       pin_memory=True,
                       num_workers=num_workers,
                       prefetch_factor=4 if num_workers > 0 else None,
-                      persistent_workers=num_workers > 0)
+                      # not for the training loader: its workers are forked at each iteration, so they see the current
+                      # set_sample flag (all patches for the Cox risk bank / Breslow passes, max_patches in training);
+                      # persistent workers kept the flag of the first pass for the whole run
+                      persistent_workers=num_workers > 0 and not train)
 
 
 def get_dataloaders(dataset, train_patients, val_patients, test_patients, config, test_modalities=None):

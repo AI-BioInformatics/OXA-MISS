@@ -5,10 +5,10 @@ Columns (True = the modality is kept for the patient in that setting; one row pe
     complete                    every modality kept
     <mod>_miss_<r>              r% of the patients that HAVE <mod> lose it (r in 0, 25, 50, 75, 100)
     missing_all_<mod>_<r>       r% of the patients with >= 2 modalities lose a random non-empty subset of their
-                                modalities, keeping at least one (r in 30, 60); the other patients keep all
+                                modalities, keeping at least one (r in 30, 60, 25, 75); the other patients keep all
 Masks are sampled per dataset and per test fold (parameters.kfold_splits of the dataset yaml), so every fold
 has the same rate. Availability is the union over the dataset yamls with the same name (WSI encoder variants,
-e.g. CPTAC UNI / UNIv2), CT/MRI with the mednet features, Clinical from the clean clinical table: the tables
+e.g. CPTAC UNI / UNIv2), CT/MRI with the suprem / mrseg token features (config/radiology.yaml), Clinical from the clean clinical table: the tables
 are the same for every encoder (the dataloader always ANDs them with what the patient really has).
 
 Used by data_loader.missing_modalities_tables (training) and missing_modality_test.scenarios (test), through
@@ -24,6 +24,7 @@ import io
 import os
 import re
 import sys
+import zlib
 
 import numpy as np
 import pandas as pd
@@ -35,7 +36,7 @@ from dataloader.dataloader_multidataset import Multimodal_Bio_Dataset  # noqa: E
 
 MODALITIES = ['WSI', 'Genomics', 'CNV', 'CT', 'MRI', 'Clinical']
 MISS_RATES = [0, 25, 50, 75, 100]
-MISSING_ALL_RATES = [30, 60]
+MISSING_ALL_RATES = [30, 60, 25, 75]   # 25 / 75 appended after 30 / 60: the earlier columns keep the same draws
 SEED = 42
 GENE_GROUPS = ["tumor_suppression", "oncogenesis", "protein_kinases", "cellular_differentiation", "cytokines_and_growth"]
 
@@ -47,6 +48,9 @@ def dataset_yamls():
         with open(path) as f:
             cfg = yaml.safe_load(f)
         if isinstance(cfg, dict) and 'parameters' in cfg and 'name' in cfg and cfg['parameters'].get('kfold_splits'):
+            if not os.path.exists(cfg['parameters'].get('dataframe_path', '')):
+                print(f"skip {cfg['name']}: no label file {cfg['parameters'].get('dataframe_path')}")
+                continue
             groups.setdefault(cfg['name'], []).append(path)
     return groups
 
@@ -60,7 +64,8 @@ def availability(paths):
                                         file_genes_group=os.path.join(REPO, 'genes_groups/pathways_ensg.json'),
                                         genomics_group_name=GENE_GROUPS, cnv_group_name=GENE_GROUPS,
                                         input_modalities=MODALITIES, model_name='OXA_MISS',
-                                        radiology_encoders={'CT': 'mednet', 'MRI': 'mednet'}, clinical_tokens={})
+                                        radiology_encoders={'CT': 'suprem', 'MRI': 'mrseg'}, radiology_tokens=True,
+                                        clinical_tokens={})
         h = ds.patient_df[[f'has_{m}' for m in MODALITIES]].astype(bool)
         h.columns = MODALITIES
         has = h if has is None else has.reindex(has.index.union(h.index), fill_value=False) | \
@@ -109,8 +114,9 @@ def main():
     ap.add_argument('--update_yamls', action='store_true', help='set parameters.missing_modalities_table_path')
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)
-    rng = np.random.default_rng(SEED)
     for name, paths in dataset_yamls().items():
+        # one generator per dataset, seeded by its name: a table does not depend on which other datasets exist
+        rng = np.random.default_rng([SEED, zlib.crc32(name.encode())])
         with open(paths[0]) as f:
             split_dir = yaml.safe_load(f)['parameters']['kfold_splits']
         has = availability(paths)

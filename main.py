@@ -1,5 +1,6 @@
 import sys
 import os
+import glob
 import argparse
 import logging
 import yaml
@@ -20,7 +21,7 @@ from dataloader.dataloader_multidataset import Multimodal_Bio_Dataset
 from dataloader.dataloader_utils import get_dataloaders, make_dataloader
 from dataloader.clinical_tokens import ClinicalTokens
 from dataloader.kfold import list_split_files, read_split, dataset_names_of, kfold_split_files, read_fold
-from dataloader.build import build_dataset, clinical_tokens_config, fold_patients
+from dataloader.build import build_dataset, clinical_tokens_config, external_test_configs, fold_patients
 from experiments.utils import import_class_from_path, ResultsStore
 import collections.abc
 import itertools
@@ -160,6 +161,131 @@ def set_clinical_normalization(mm, dataset, train_patients, config):
     logging.info(f"clinical numerical {dataset.clinical_tokens.token_names[:len(mean)]}: mean {mean}, std {std} (training patients)")
 
 
+def evaluate_external_at_end(config, ModelClass, dataset, splits, results_store, parent_directory, repo_dir,
+                             checkpoint_last_epoch, checkpoint_model_highest_metric, checkpoint_model_lowest_loss):
+    """External test (data_loader.external_test_configs) after all the folds: the external slides are read once,
+    when the training ones are no longer needed (page cache: one cohort set at a time within the job memory).
+    Each fold's checkpoints (from disk, with their clinical normalization and Breslow baseline) are tested with
+    that fold's training normalization, as in the per-fold test: same seeded fold patients, genomics / CNV
+    z-score of its training patients, reference survival of its training patients."""
+    external_names = external_test_configs(config)[1]
+    external_patients = dataset.patient_df.index[dataset.patient_df["dataset_name"].isin(external_names)].to_numpy()
+    if not len(external_patients):
+        return
+    test_scenarios = config.missing_modality_test.scenarios if config.missing_modality_test.active else []
+    if dataset.load_slides_in_RAM:   # training slides out of memory, external slides in (read once)
+        dataset.reload_slide_cache(external=True)
+    dataset.set_sample(config.data_loader.test_sample)   # all the patches
+    for i, fold_files in enumerate(splits):
+        torch.cuda.empty_cache()
+        setup(config.seed)                                # same RNG state as the fold loop: same validation patients
+        foldname = f"Fold_{i+1}"
+        train_patients, val_patients, test_patients = fold_patients(config, dataset, fold_files)
+        normalized_test = np.concatenate((test_patients, external_patients))
+        if config.data_loader.get('wsi_representation', 'patches') == 'gmm':
+            dataset.set_wsi_gmm_fold(i)                   # the fold's GMM prototypes (fitted without its test patients)
+        if "Genomics" in config.model.kwargs.input_modalities:
+            dataset.normalize_genomics(train_patients, val_patients, normalized_test)
+        if "CNV" in config.model.kwargs.input_modalities:
+            dataset.normalize_cnv(train_patients, val_patients, normalized_test)
+        mm = ModelManager(config, ModelClass, results_store)
+        set_reference_survival(mm, dataset, train_patients)
+        print(f"{foldname}: external test on {len(external_patients)} patients of {external_names} (after all the folds)")
+        for test_modalities in config.data_loader.modalities.test:
+            external_dataloader = make_dataloader(dataset, "test", external_patients, test_modalities, config)
+            mm.evaluate_all(external_dataloader,
+                            scenarios=[None] + list(test_scenarios),
+                            task_type=config.data_loader.task_type,
+                            checkpoint_last_epoch=checkpoint_last_epoch,
+                            checkpoint_model_highest_metric=checkpoint_model_highest_metric,
+                            checkpoint_model_lowest_loss=checkpoint_model_lowest_loss,
+                            best=True,
+                            device=config.model.device,
+                            path=f"{parent_directory}",
+                            kfold=foldname,
+                            log_aggregated=i == len(splits) - 1,
+                            log_on_telegram=False,
+                            Save_XA_attention_files=False,
+                            repo_path=repo_dir,
+                            test_modalities=test_modalities,
+                            external=True)
+        mm = None
+
+
+def find_resumable_run(experiment_dir, seed):
+    """--resume: the latest run folder of experiment_dir with this seed and without RUN_COMPLETE (None if none)."""
+    candidates = []
+    for run in sorted(glob.glob(os.path.join(experiment_dir, "*", "config.yaml"))):
+        run_dir = os.path.dirname(run)
+        if os.path.exists(os.path.join(run_dir, "RUN_COMPLETE")):
+            continue
+        with open(run) as f:
+            if (yaml.safe_load(f) or {}).get("seed") == seed:
+                candidates.append(run_dir)
+    return candidates[-1] if candidates else None   # folder names start with the date: the last is the latest
+
+
+def stage2_backbone_checkpoint(config, foldname):
+    """Checkpoint of the stage-1 backbone for this fold (trainer.stage2). backbone_run = one run folder, or a folder
+    of runs (e.g. the no_radiology variant of the stage): the run whose config.yaml has this run's seed. The
+    backbone run must share seed, datasets, internal validation size (same training / validation / test
+    patients of every fold) and the model, and have the same modalities without CT / MRI."""
+    stage2 = config.trainer.stage2
+    root = stage2.backbone_run
+    candidates = [root] if os.path.exists(os.path.join(root, "config.yaml")) else \
+        sorted(os.path.dirname(p) for p in glob.glob(os.path.join(root, "**", "config.yaml"), recursive=True))
+    runs = []
+    for run in candidates:
+        with open(os.path.join(run, "config.yaml")) as f:
+            if yaml.safe_load(f).get("seed") == config.seed:
+                runs.append(run)
+    if len(runs) != 1:
+        raise ValueError(f"trainer.stage2.backbone_run {root}: {len(runs)} runs with seed {config.seed} ({runs[:3]}), need one")
+    run = runs[0]
+    with open(os.path.join(run, "config.yaml")) as f:
+        bb = munchify(yaml.safe_load(f))
+    checks = {"model.name": (bb.model.name, config.model.name),
+              "datasets_configs": (list(bb.data_loader.datasets_configs), list(config.data_loader.datasets_configs)),
+              "internal_val_size": (bb.data_loader.KFold.internal_val_size, config.data_loader.KFold.internal_val_size)}
+    differ = {k: v for k, v in checks.items() if v[0] != v[1]}
+    if differ:
+        raise ValueError(f"stage 2: backbone run {run} differs from this run: {differ}")
+    ours, theirs = set(config.model.kwargs.input_modalities), set(bb.model.kwargs.input_modalities)
+    if not theirs <= ours or not (ours - theirs) <= {"CT", "MRI"} or not (ours - theirs):
+        raise ValueError(f"stage 2: backbone modalities {sorted(theirs)}, this run {sorted(ours)}: expected the same plus CT / MRI")
+    if config.model.kwargs.get("rad_gate", "sigmoid") != "tanh_zero":
+        raise ValueError("stage 2 needs model.kwargs.rad_gate: tanh_zero (the model starts from the backbone)")
+    path = os.path.join(run, f"model_{stage2.get('checkpoint', 'lowest_loss')}_{foldname}.pt")
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"stage 2: no backbone checkpoint {path}")
+    return path
+
+
+def start_stage2(mm, config, dataset, foldname, train_patients, val_patients):
+    """Two-stage training, stage 2: the fold's stage-1 backbone into mm.net (frozen or fine-tuned), training and
+    validation only on the patients with CT or MRI (the stage-1 validation patients never trained the backbone).
+    The test set is unchanged: without radiology the zero-gated model returns exactly the backbone's output.
+    -> (train_dataloader, val_dataloader)."""
+    stage2 = config.trainer.stage2
+    mm.load_backbone(stage2_backbone_checkpoint(config, foldname), mode=stage2.get("backbone", "frozen"),
+                     lr_scale=stage2.get("finetune_lr_scale", 0.1))
+    rad = [f"has_{m}" for m in ("CT", "MRI") if m in config.model.kwargs.input_modalities]
+
+    def with_radiology(patients):
+        if patients is None:
+            return None
+        patients = patients[np.isin(patients, dataset.patient_df.index)]
+        return patients[dataset.patient_df.loc[patients, rad].any(axis=1).to_numpy()]
+
+    # Breslow baseline of the stage-2 checkpoints on ALL the training patients (the loader of stage 1)
+    mm.breslow_dataloader = get_dataloaders(dataset, train_patients, None, None, config)[0]
+    train_r, val_r = with_radiology(train_patients), with_radiology(val_patients)
+    print(f"{foldname} stage 2: {len(train_r)} training / {len(val_r) if val_r is not None else 0} validation patients with radiology")
+    train_dataloader, val_dataloader, _ = get_dataloaders(dataset, train_r, val_r if val_r is not None and len(val_r) else None,
+                                                          None, config)
+    return train_dataloader, val_dataloader
+
+
 def set_reference_survival(mm, dataset, train_patients):
     """Censoring distribution of Uno's c-index / IBS: the fold's training patients."""
     if train_patients is None or "censorship" not in dataset.patient_df.columns:
@@ -184,6 +310,10 @@ if __name__ == "__main__":
                             help="the config file to be used to run the experiment")
     arg_parser.add_argument("--verbose", action='store_true', help="Log also to stdout")
     arg_parser.add_argument("--debug", action='store_true', help="debug, no wandb")
+    arg_parser.add_argument("--resume", action='store_true',
+                            help="continue the latest unfinished run folder of this version and seed (no RUN_COMPLETE): "
+                                 "folds already trained (<fold>.trained) are only re-evaluated from their checkpoints, "
+                                 "the interrupted fold is retrained from scratch; same wandb run")
     arg_parser.add_argument("--seed", default=None, type=int, help="random seed (default: the config's seed, else 42)")        
     arg_parser.add_argument("--grid_search_model_version_index", type=int, default=None)  
     arg_parser.add_argument("--grid_search_versions", type=str, default=None,
@@ -233,6 +363,11 @@ if __name__ == "__main__":
     # a model with its own radiology encoder (attention pooling over the CT / MRI regions) reads the unpooled
     # token matrices; the others one mean-pooled vector per exam
     config.data_loader.radiology_tokens = 'num_ct_latent_queries' in inspect.signature(ModelClass.__init__).parameters
+    # per-token position / organ fraction of the CT / MRI tokens, only for the models that use them
+    if (config.data_loader.get('wsi_representation', 'patches') == 'gmm') != (config.model.kwargs.get('wsi_encoder', 'patches') == 'gmm'):
+        raise ValueError("data_loader.wsi_representation gmm and model.kwargs.wsi_encoder gmm go together")
+    config.data_loader.radiology_token_meta = bool(config.model.kwargs.get('radiology_occ_bias', False)
+                                                   or config.model.kwargs.get('radiology_pos_enc', False))
     # module B adversary active: the study must not be an input it is asked to unlearn (the pattern target too:
     # the missingness pattern differs by study, so the encoder would be pushed to hide the study token as well)
     if config.model.kwargs.get('shortcut_adversary_weight', 0) > 0 and config.data_loader.get('clinical', {}).get('use_study_id'):
@@ -247,7 +382,7 @@ if __name__ == "__main__":
 
     if args.TCGA_dataset_name is not None:
         # run the same config on another TCGA cohort: the cohort of the (single) dataset yaml, e.g.
-        # config/TCGA_BLCA_dataset_UNI.yaml, is replaced in the dataset yaml, splits and missing table paths
+        # config/TCGA_BLCA_dataset.yaml, is replaced in the dataset yaml, splits and missing table paths
         if len(config.data_loader.datasets_configs) != 1:
             raise ValueError("--TCGA_dataset_name needs exactly one dataset config")
         match = re.search(r"TCGA_([A-Z]+)_", os.path.basename(config.data_loader.datasets_configs[0]))
@@ -336,7 +471,15 @@ if __name__ == "__main__":
     run_id = (f"{job_id}-{task_id}" if task_id else job_id) if job_id else timehash()
     config.run_description = f"{experiment_title}_{modalities_str}"
     config.title = f"{now:%Y-%m-%d_%H-%M-%S}_{run_id}"
-    parent_directory = os.path.join(config.project_dir, experiment_title, config.title)
+    # results_subdir (optional): a level between project_dir and the experiment, e.g. ABL2/S1_architecture
+    experiment_dir = os.path.join(config.project_dir, config.get('results_subdir') or '', experiment_title)
+    resumed = find_resumable_run(experiment_dir, config.seed) if args.resume else None
+    if resumed:
+        config.title = os.path.basename(resumed)
+        logging.info(f"--resume: continuing {resumed}")
+    elif args.resume:
+        logging.info(f"--resume: no unfinished run of seed {config.seed} in {experiment_dir}, starting a new one")
+    parent_directory = os.path.join(experiment_dir, config.title)
     config.parent_directory = parent_directory
     checkpoint_last_epoch = os.path.join(parent_directory, 'model_last_epoch.pt')
     checkpoint_model_lowest_loss = os.path.join(parent_directory, 'model_lowest_loss.pt')
@@ -367,15 +510,24 @@ if __name__ == "__main__":
     with open(copy_config_path, 'w') as config_file:
         yaml.dump(unmunchify(config), config_file, default_flow_style=False, sort_keys=True)
 
-    wandb_name = f"{config.title}"
+    # wandb.job_type (optional, e.g. the ablation variant): run name <job_type>_seed<seed>_<job id>
+    wandb_job_type = config.wandb.get('job_type')
+    wandb_name = f"{wandb_job_type}_seed{config.seed}_{run_id}" if wandb_job_type else f"{config.title}"
     # start wandb
+    wandb_id_path = os.path.join(parent_directory, 'wandb_id.txt')
+    wandb_resume = {}
+    if resumed and os.path.exists(wandb_id_path):   # same wandb run as the interrupted job
+        with open(wandb_id_path) as f:
+            wandb_resume = {"id": f.read().strip(), "resume": "allow"}
     wandb.init(
+        **wandb_resume,
         project=config.wandb.project if hasattr(config.wandb,'project') else "multimodal_decider",
-        entity="multimodal_decider",
+        entity=config.wandb.get("entity") or "multimodal_missingness",   # wandb.entity: team / user of the runs
         name=wandb_name,
         config=unmunchify(config),
         mode="disabled" if args.debug else config.wandb.mode,  # an explicit mode overrides WANDB_DISABLED
-        group=experiment_title,  # runs of the same experiment (e.g. the modality combinations) grouped together
+        group=config.wandb.get('group') or experiment_title,  # runs of the same experiment grouped (wandb.group: e.g. the ablation stage)
+        job_type=wandb_job_type,
         notes=config.run_description,  # what the run is (the name is only time + ID)
         tags=[config.model.name] + dataset_names_of(config) + list(config.model.kwargs.input_modalities) +
              [f"test_{'+'.join(t)}" for t in config.data_loader.modalities.test] +
@@ -384,6 +536,9 @@ if __name__ == "__main__":
     )
     # per-epoch curves (overall loss and c-index of each fold) are charts with the epoch as x-axis, so the
     # folds overlay; they are kept out of the run summary, which has only the results/* keys
+    if wandb.run is not None and wandb.run.id:   # for --resume
+        with open(wandb_id_path, "w") as f:
+            f.write(wandb.run.id)
     wandb.define_metric("Epoch", summary="none")
     for key in ["LR", "Train/*", "Valid/*", "Test/*"]:
         wandb.define_metric(key, step_metric="Epoch", summary="none")
@@ -412,6 +567,8 @@ if __name__ == "__main__":
         if dataset.clinical_tokens is not None:
             config.model.kwargs.clinical_n_numerical = len(dataset.clinical_tokens.token_names) - len(dataset.clinical_tokens.cat_cols)
             config.model.kwargs.clinical_cat_cardinalities = list(dataset.clinical_tokens.cat_cardinalities)
+            if 'clinical_cat_names' in inspect.signature(ModelClass.__init__).parameters:
+                config.model.kwargs.clinical_cat_names = list(dataset.clinical_tokens.cat_cols)   # clinical_ordinal
             config.data_loader.clinical_token_names = list(dataset.clinical_tokens.token_names)
     if 'WSI' in config.model.kwargs.input_modalities and 'input_dim' in config.model.kwargs:
         # patch feature size from the features of each dataset: they must use the same WSI encoder
@@ -586,11 +743,18 @@ if __name__ == "__main__":
                     print('Loading split', split_path)
             train_patients, val_patients, test_patients = fold_patients(config, dataset, fold_files)
             len_val = len(val_patients) if val_patients is not None else 0
+            # external test patients (data_loader.external_test_configs): in no fold, normalized with the
+            # training statistics of the fold as the test patients
+            external_names = external_test_configs(config)[1]
+            external_patients = dataset.patient_df.index[dataset.patient_df["dataset_name"].isin(external_names)].to_numpy()
+            normalized_test = np.concatenate((test_patients, external_patients)) if len(external_patients) else test_patients
             
+            if config.data_loader.get('wsi_representation', 'patches') == 'gmm':
+                dataset.set_wsi_gmm_fold(i)   # GMM prototypes fitted without this fold's test patients
             if "Genomics" in config.model.kwargs.input_modalities:
-                dataset.normalize_genomics(train_patients, val_patients, test_patients)
+                dataset.normalize_genomics(train_patients, val_patients, normalized_test)
             if "CNV" in config.model.kwargs.input_modalities:
-                dataset.normalize_cnv(train_patients, val_patients, test_patients)
+                dataset.normalize_cnv(train_patients, val_patients, normalized_test)
             train_dataloader, val_dataloader, test_dataloader = get_dataloaders(    
                                                                                     dataset=dataset,
                                                                                     train_patients=train_patients, 
@@ -614,30 +778,43 @@ if __name__ == "__main__":
             mm = ModelManager(config, ModelClass, results_store)
             set_clinical_normalization(mm, dataset, train_patients, config)
             set_reference_survival(mm, dataset, train_patients)
-            mm.train(train_dataloader, 
-                        val_dataloader, 
-                        test_dataloader, 
-                        task_type=config.data_loader.task_type, 
-                        checkpoint_last_epoch=checkpoint_last_epoch, 
-                        checkpoint_model_highest_metric=checkpoint_model_highest_metric,
-                        checkpoint_model_lowest_loss=checkpoint_model_lowest_loss,
-                        device=config.model.device, 
-                        path=f"{parent_directory}", 
-                        kfold=foldname, 
-                        config=config, 
-                        debug=args.debug)
+            trained_marker = os.path.join(parent_directory, f"{foldname}.trained")
+            if os.path.exists(trained_marker):
+                # --resume: this fold finished training in an earlier job; its checkpoints (with the Breslow
+                # baseline) are evaluated from disk below (evaluate_all with best=True loads them)
+                logging.info(f"{foldname}: already trained ({trained_marker}), evaluation only")
+            if not os.path.exists(trained_marker) and (config.trainer.get('stage2') or {}).get('backbone_run'):
+                # two-stage training: stage-1 backbone of the fold + radiology branch trained on the CT / MRI patients
+                train_dataloader, val_dataloader = start_stage2(mm, config, dataset, foldname, train_patients, val_patients)
+            if not os.path.exists(trained_marker):
+                mm.train(train_dataloader,
+                         val_dataloader,
+                         test_dataloader,
+                         task_type=config.data_loader.task_type,
+                         checkpoint_last_epoch=checkpoint_last_epoch,
+                         checkpoint_model_highest_metric=checkpoint_model_highest_metric,
+                         checkpoint_model_lowest_loss=checkpoint_model_lowest_loss,
+                         device=config.model.device,
+                         path=f"{parent_directory}",
+                         kfold=foldname,
+                         config=config,
+                         debug=args.debug)
+                if config.model.save_checkpoints:   # checkpoints of the fold on disk: --resume can skip its training
+                    open(trained_marker, "w").close()
             
+            # evaluation on all the patches (test_sample): set here too, not only by the training loop, so a fold
+            # evaluated without training (--resume) is evaluated exactly as in the original run
+            dataset.set_sample(config.data_loader.test_sample)
             log_on_telegram = True if not hasattr(config, 'log_on_telegram') else config.log_on_telegram
             # the model of the fold on every test modality set (the first one is test_dataloader), on the base
             # test set and each missing modality scenario
             test_scenarios = config.missing_modality_test.scenarios if config.missing_modality_test.active else []
+            # one pass over the test patients per test modality set: every checkpoint x scenario on each batch
             for i_test, test_modalities in enumerate(config.data_loader.modalities.test):
                 if i_test > 0:
                     test_dataloader = make_dataloader(dataset, "test", test_patients, test_modalities, config)
-                for i_scenario, scenario in enumerate([None] + list(test_scenarios)):
-                    if scenario is not None:
-                        print('Testing the model with missing modality scenario:', scenario)
-                    mm.evaluate(test_dataloader,
+                mm.evaluate_all(test_dataloader,
+                                scenarios=[None] + list(test_scenarios),
                                 task_type=config.data_loader.task_type,
                                 checkpoint_last_epoch=checkpoint_last_epoch,
                                 checkpoint_model_highest_metric=checkpoint_model_highest_metric,
@@ -649,10 +826,36 @@ if __name__ == "__main__":
                                 log_aggregated = i==len(splits)-1,
                                 log_on_telegram = log_on_telegram,
                                 Save_XA_attention_files = config.trainer.Save_XA_attention_files,
-                                print_demo_results = args.demo_training and scenario is not None and i_scenario==len(test_scenarios) and i==len(splits)-1,
-                                eval_missing_modality_scenario = scenario,
+                                print_demo_results = args.demo_training and len(test_scenarios) > 0 and i==len(splits)-1,
                                 repo_path=repo_dir,
                                 test_modalities=test_modalities)
+            # the same fold model on the external test datasets: results under the scenario external[/...]
+            # (results_summary_external*.csv), pooled metrics = ensemble of the fold models (experiments/utils.py);
+            # with data_loader.external_test_at_end (default) after all the folds instead (evaluate_external_at_end)
+            if len(external_patients) and not config.data_loader.get('external_test_at_end', True):
+                print(f"{foldname}: external test on {len(external_patients)} patients of {external_names}")
+                for test_modalities in config.data_loader.modalities.test:
+                    external_dataloader = make_dataloader(dataset, "test", external_patients, test_modalities, config)
+                    mm.evaluate_all(external_dataloader,
+                                    scenarios=[None] + list(test_scenarios),
+                                    task_type=config.data_loader.task_type,
+                                    checkpoint_last_epoch=checkpoint_last_epoch,
+                                    checkpoint_model_highest_metric=checkpoint_model_highest_metric,
+                                    checkpoint_model_lowest_loss=checkpoint_model_lowest_loss,
+                                    best=best,
+                                    device=config.model.device,
+                                    path=f"{parent_directory}",
+                                    kfold=foldname,
+                                    log_aggregated = i==len(splits)-1,
+                                    log_on_telegram = False,
+                                    Save_XA_attention_files = False,
+                                    repo_path=repo_dir,
+                                    test_modalities=test_modalities,
+                                    external=True)
+
+        if config.data_loader.get('external_test_at_end', True):
+            evaluate_external_at_end(config, ModelClass, dataset, splits, results_store, parent_directory, repo_dir,
+                                     checkpoint_last_epoch, checkpoint_model_highest_metric, checkpoint_model_lowest_loss)
 
     end_time = time.time() 
     execution_time = end_time - start_time
@@ -661,4 +864,5 @@ if __name__ == "__main__":
     minutes = (execution_time % 3600) // 60
     seconds = execution_time % 60
     print(f"########################\n\n\nThe program took (DD--HH:MM:SS) {int(days)}-{int(hours)}:{int(minutes)}:{int(seconds)} to run.\n\n\n#################################")     
+    open(os.path.join(parent_directory, 'RUN_COMPLETE'), 'w').close()   # --resume / run_grid_search.py --resume skip it
     wandb.finish()

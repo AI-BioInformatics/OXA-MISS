@@ -1,12 +1,15 @@
 """Dataset and fold patients of a config, shared by main.py and the analysis scripts (utils/), so that they
 build exactly the same data."""
+import logging
+
 import numpy as np
+import yaml
 
 from .dataloader_multidataset import Multimodal_Bio_Dataset
 from .kfold import read_fold
 
 
-CLINICAL_TOKENS_KEYS = ("table", "categorical", "use_study_id", "excluded_studies")
+CLINICAL_TOKENS_KEYS = ("table", "categorical", "use_study_id", "use_cancer_type", "excluded_studies")
 
 
 def clinical_tokens_config(config):
@@ -21,10 +24,39 @@ def clinical_tokens_config(config):
     return {k: v for k, v in clinical.items() if v is not None}
 
 
+def _dataset_name(path):
+    with open(path) as f:
+        return yaml.safe_load(f)['name']
+
+
+def external_test_configs(config):
+    """(yaml paths, names) of the external test datasets of the run: data_loader.external_test_configs, e.g. the
+    CPTAC cohorts of a TCGA pan-cancer run. Each fold model is also tested on them (k-fold only); they are in no
+    fold. An external dataset is skipped when the training datasets already contain data of the same source
+    (the prefix of the name, e.g. CPTAC in CPTAC_CCRCC): a ccRCC run (CPTAC_CCRCC + TCGA_KIRC) gets no external
+    CPTAC test."""
+    paths = list(config.data_loader.get('external_test_configs') or [])
+    if not paths:
+        return [], []
+    training_sources = {_dataset_name(p).split('_')[0] for p in config.data_loader.datasets_configs}
+    kept, names = [], []
+    for path in paths:
+        name = _dataset_name(path)
+        if name.split('_')[0] in training_sources:
+            logging.info(f"external test {name} skipped: the training datasets contain {name.split('_')[0]} data")
+            continue
+        kept.append(path)
+        names.append(name)
+    return kept, names
+
+
 def build_dataset(config):
-    """The Multimodal_Bio_Dataset of a (resolved) config: modalities, clinical tokens, radiology encoders..."""
+    """The Multimodal_Bio_Dataset of a (resolved) config: modalities, clinical tokens, radiology encoders...
+    The external test datasets (external_test_configs) are loaded too, flagged as external."""
+    external_paths, external_names = external_test_configs(config)
     return Multimodal_Bio_Dataset(
-                            datasets_configs=config.data_loader.datasets_configs, 
+                            datasets_configs=list(config.data_loader.datasets_configs) + external_paths,
+                            external_datasets=external_names, 
                             task_type=config.data_loader.task_type,                           
                             max_patches=config.data_loader.max_patches,
                             n_bins=config.data_loader.n_bins,
@@ -46,6 +78,10 @@ def build_dataset(config):
                             radiology_encoders = config.data_loader.get('radiology_encoders'),
                             clinical_tokens = clinical_tokens_config(config),
                             radiology_tokens = bool(config.data_loader.get('radiology_tokens', False)),
+                            radiology_token_filter = config.data_loader.get('radiology_token_filter', 'valid'),
+                            radiology_token_meta = bool(config.data_loader.get('radiology_token_meta', False)),
+                            wsi_representation = config.data_loader.get('wsi_representation', 'patches'),
+                            wsi_gmm_dir = config.data_loader.get('wsi_gmm_dir'),
                         )
 
 

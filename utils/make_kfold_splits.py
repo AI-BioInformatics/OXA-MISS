@@ -10,10 +10,10 @@ so all the slides of a patient are in the same fold.
 
 Outputs (columns: train, test; fold k is the test set of splits_k):
     <out>/<DATASET>/splits_{0..4}.csv      one folder per label file in dataloader/dataset_updated/
-    <ccrcc_out>/splits_{0..4}.csv          combined ccRCC cohort (CPTAC + TCGA-KIRC) of the OXA_MISS_ccRCC configs
+    <ccrcc_out>/splits_{0..4}.csv          optional (--ccrcc_out): combined ccRCC cohort (CPTAC + TCGA-KIRC)
 
 Usage:
-    python utils/make_kfold_splits.py [--n_folds 5] [--out splits/OS_grouped_5fold] [--ccrcc_out /work/H2020DeciderFicarra/ccRCC/CPTAC_ccRCC]
+    python utils/make_kfold_splits.py [--n_folds 5] [--out splits/OS_grouped_5fold] [--ccrcc_out <folder>]
 """
 import argparse
 import contextlib
@@ -36,11 +36,11 @@ SEED = 42
 MODALITIES = ['WSI', 'Genomics', 'CNV', 'CT', 'MRI', 'Clinical']
 GENE_GROUPS = ["tumor_suppression", "oncogenesis", "protein_kinases", "cellular_differentiation", "cytokines_and_growth"]
 # label file -> dataset yaml with the paths of its modalities
-DATASET_CONFIGS = {'CPTAC_CCRCC': 'config/ccRCC.yaml', 'TCGA_KIRC': 'config/TCGA_KIRC_dataset.yaml'}
+DATASET_CONFIGS = {}   # every label file <name>_labels.csv has config/<name>_dataset.yaml
 
 
 def dataset_config(name):
-    return os.path.join(REPO, DATASET_CONFIGS.get(name, f'config/{name}_dataset_UNI.yaml'))
+    return os.path.join(REPO, DATASET_CONFIGS.get(name, f'config/{name}_dataset.yaml'))
 
 
 def patient_table(name):
@@ -53,7 +53,9 @@ def patient_table(name):
         ds = Multimodal_Bio_Dataset(datasets_configs=[dataset_config(name)], task_type='Survival', n_bins=4,
                                     file_genes_group=os.path.join(REPO, 'genes_groups/pathways_ensg.json'),
                                     genomics_group_name=GENE_GROUPS, cnv_group_name=GENE_GROUPS,
-                                    input_modalities=MODALITIES, model_name='OXA_MISS')
+                                    input_modalities=MODALITIES, model_name='OXA_MISS',
+                                    radiology_encoders={'CT': 'suprem', 'MRI': 'mrseg'}, radiology_tokens=True,
+                                    clinical_tokens={})
     has = ds.patient_df[[f'has_{m}' for m in MODALITIES]].reindex(patients.index).fillna(False).astype(bool)
     has.columns = MODALITIES
     patients = patients.join(has)
@@ -165,7 +167,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--n_folds', type=int, default=N_FOLDS)
     ap.add_argument('--out', default=os.path.join(REPO, 'splits', 'OS_grouped_5fold'))
-    ap.add_argument('--ccrcc_out', default='/work/H2020DeciderFicarra/ccRCC/CPTAC_ccRCC')
+    ap.add_argument('--ccrcc_out', default=None, help='optional folder of the combined ccRCC splits (CPTAC_CCRCC + TCGA_KIRC); '
+                    'not needed: the dataloader concatenates the per-dataset folds')
     args = ap.parse_args()
     N_FOLDS = args.n_folds
 
@@ -175,12 +178,18 @@ def main():
         tables[name] = patient_table(name)
         make(name, tables[name], os.path.join(args.out, name))
 
-    # combined ccRCC cohort (config/ccRCC.yaml + config/TCGA_KIRC_dataset.yaml)
-    patients = pd.concat([tables['CPTAC_CCRCC'], tables['TCGA_KIRC']])
-    assert not patients.index.duplicated().any()
-    report = make('ccRCC (CPTAC+KIRC)', patients, args.ccrcc_out)
-    # not inside ccrcc_out: main.py reads every file of the splits folder as a fold
-    report.to_csv(os.path.join(args.out, 'ccRCC_fold_balance_by_modality_combination.csv'), index=False)
+    # combined ccRCC cohort (config/CPTAC_CCRCC_dataset.yaml + config/TCGA_KIRC_dataset.yaml): balance report of the
+    # per-dataset folds as the dataloader concatenates them; own split folder only with --ccrcc_out
+    if 'CPTAC_CCRCC' in tables and 'TCGA_KIRC' in tables:
+        patients = pd.concat([tables['CPTAC_CCRCC'], tables['TCGA_KIRC']])
+        assert not patients.index.duplicated().any()
+        if args.ccrcc_out:
+            report = make('ccRCC (CPTAC+KIRC)', patients, args.ccrcc_out)
+        else:
+            folds = pd.concat([read_folds(os.path.join(args.out, n)) for n in ('CPTAC_CCRCC', 'TCGA_KIRC')])
+            report = balance_report(patients, folds.reindex(patients.index))
+        # not inside a splits folder: main.py reads every file of the splits folder as a fold
+        report.to_csv(os.path.join(args.out, 'ccRCC_fold_balance_by_modality_combination.csv'), index=False)
 
 
 if __name__ == '__main__':

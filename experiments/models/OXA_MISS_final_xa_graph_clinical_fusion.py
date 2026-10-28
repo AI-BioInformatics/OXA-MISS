@@ -90,9 +90,12 @@ class GatedAttentionPooling(nn.Module):
         self.U = nn.Linear(dim, dim)
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, tokens):
+    def forward(self, tokens, bias=None):
+        """bias (B, N): added to the attention logits of every query (radiology_occ_bias: log organ fraction)."""
         keys = torch.tanh(self.V(tokens)) * torch.sigmoid(self.U(tokens))              # (B, N, dim)
         scores = torch.matmul(self.queries, keys.transpose(1, 2)) / keys.size(-1) ** 0.5   # (B, K, N)
+        if bias is not None:
+            scores = scores + bias.unsqueeze(1)
         weights = self.dropout(F.softmax(scores, dim=-1))
         return torch.matmul(weights, tokens), scores
 
@@ -102,9 +105,17 @@ class RadiologyHub(nn.Module):
     pooled CT / MRI tokens of the patient the context. Each modality's tokens get a content gate (scalar per
     patient, from their mean) and a modality-type embedding; the available ones are concatenated.
     core <- LN1(core + XA(core, tokens)); core <- LN2(core + FF(core)). Without radiology the update is zero but
-    the same LN / FF path runs: the scale of the output does not depend on the presence of CT / MRI."""
-    def __init__(self, dim, modalities, dropout=0.1):
+    the same LN / FF path runs: the scale of the output does not depend on the presence of CT / MRI.
+    gate="tanh_zero" (rad_gate): out = core + tanh(alpha) * (hub(core, tokens) - core), alpha a scalar initialized
+    at 0 (Flamingo-style), and out = core exactly without radiology: at initialization the hub is the identity and
+    the model equals the same model without radiology (two-stage training starts from the backbone)."""
+    def __init__(self, dim, modalities, dropout=0.1, gate="sigmoid"):
         super().__init__()
+        if gate not in ("sigmoid", "tanh_zero"):
+            raise ValueError(f"rad_gate {gate}: sigmoid | tanh_zero")
+        self.gate = gate
+        if gate == "tanh_zero":
+            self.alpha = nn.Parameter(torch.zeros(1))
         self.modalities = list(modalities)
         self.type_embedding = nn.Embedding(len(self.modalities), dim)
         self.gates = nn.ModuleDict({m: nn.Sequential(nn.Linear(dim, dim // 2), nn.ReLU(), nn.Linear(dim // 2, 1))
@@ -122,11 +133,49 @@ class RadiologyHub(nn.Module):
                 gate = torch.sigmoid(self.gates[m](tokens[m].mean(dim=1)))              # (B, 1)
                 pieces.append(tokens[m] * gate.unsqueeze(1) + self.type_embedding.weight[i])
         attention = None
+        gated = getattr(self, "gate", "sigmoid") == "tanh_zero"   # checkpoints older than the flag
+        if gated and not pieces:
+            return core, None
+        x = core
         if pieces:
             update, attention = self.cross_attention(core.unsqueeze(1), torch.cat(pieces, dim=1))
-            core = core + update.squeeze(1)
-        core = self.norm1(core)
-        return self.norm2(core + self.ff(core)), attention
+            x = x + update.squeeze(1)
+        x = self.norm1(x)
+        x = self.norm2(x + self.ff(x))
+        if gated:
+            return core + torch.tanh(self.alpha) * (x - core), attention
+        return x, attention
+
+
+class ChunkedSelfAttentionLayer(nn.Module):
+    """Pre-LN transformer encoder layer (as nn.TransformerEncoderLayer(norm_first=True, ReLU feed-forward)) whose
+    self-attention is computed in chunks of `chunk` queries against all the keys: identical result, memory
+    chunk x N instead of N x N (MBT over all the patches of a slide at evaluation, ~20k tokens).
+    key_padding_mask (B, N): True = padding (not attended)."""
+    def __init__(self, dim, heads=4, ff_mult=2, dropout=0.1, chunk=4096):
+        super().__init__()
+        self.heads, self.chunk, self.dropout_p = heads, chunk, dropout
+        self.norm1, self.norm2 = nn.LayerNorm(dim), nn.LayerNorm(dim)
+        self.qkv, self.out = nn.Linear(dim, 3 * dim), nn.Linear(dim, dim)
+        self.ff = nn.Sequential(nn.Linear(dim, ff_mult * dim), nn.ReLU(), nn.Dropout(dropout), nn.Linear(ff_mult * dim, dim))
+        self.drop1, self.drop2 = nn.Dropout(dropout), nn.Dropout(dropout)
+
+    def forward(self, x, key_padding_mask=None):
+        b, n, d = x.shape
+        q, k, v = self.qkv(self.norm1(x)).view(b, n, 3, self.heads, d // self.heads).permute(2, 0, 3, 1, 4)
+        mask = None if key_padding_mask is None else (~key_padding_mask)[:, None, None, :]   # True = attended
+        p = self.dropout_p if self.training else 0.0
+        att = torch.cat([F.scaled_dot_product_attention(q[:, :, s:s + self.chunk], k, v, attn_mask=mask, dropout_p=p)
+                         for s in range(0, n, self.chunk)], dim=2)                            # (B, H, N, d / H)
+        x = x + self.drop1(self.out(att.transpose(1, 2).reshape(b, n, d)))
+        return x + self.drop2(self.ff(self.norm2(x)))
+
+
+def sinusoidal_3d(xyz, n_freq=8):
+    """(..., 3) coordinates in [0, 1] -> (..., 6 * n_freq) sin / cos features at frequencies 2^k * pi per axis."""
+    freqs = (2.0 ** torch.arange(n_freq, device=xyz.device, dtype=xyz.dtype)) * torch.pi
+    angles = xyz.unsqueeze(-1) * freqs                                  # (..., 3, n_freq)
+    return torch.cat([angles.sin(), angles.cos()], dim=-1).flatten(start_dim=-2)
 
 
 class GradientReversal(torch.autograd.Function):
@@ -141,8 +190,11 @@ class GradientReversal(torch.autograd.Function):
 
 
 # sex, ajcc_stage, ajcc_t, ajcc_n, ajcc_m (vocabolario in dataloader/clinical_tokens.py; main.py passa le
-# cardinalita' del dataset in clinical_cat_cardinalities)
+# cardinalita' del dataset in clinical_cat_cardinalities e i nomi in clinical_cat_names)
 DEFAULT_CAT_CARDINALITIES = [2, 4, 4, 4, 2]
+DEFAULT_CAT_NAMES = ["sex", "ajcc_stage", "ajcc_t", "ajcc_n", "ajcc_m"]
+# variabili con categorie ordinate nel vocabolario (stage i..iv, t1..t4, n0..n3, m0..m1): clinical_ordinal
+ORDINAL_CAT_NAMES = ("ajcc_stage", "ajcc_t", "ajcc_n", "ajcc_m")
 
 
 class ClinicalFeatureTokenizer(nn.Module):
@@ -150,11 +202,14 @@ class ClinicalFeatureTokenizer(nn.Module):
     - numeriche: valore * scala + bias appresi per variabile; arrivano GREZZE: z-score con num_mean / num_std
       (buffer: media/std del training del fold, salvate nel checkpoint);
     - categoriche: embedding con padding_idx=0 (mancante = vettore nullo, non appreso);
+    - categoriche ordinali (ordinal, ablation clinical_ordinal): al posto dell'embedding, il rango come numero
+      in [-1, 1] ((k-1)/(card-1) * 2 - 1) * scala + bias appresi per variabile, come l'eta': la direzione e'
+      la stessa per tutti i livelli, l'ordine stage i < ii < iii < iv e' nell'input invece che da imparare;
     - valori mancanti (missing, ablation): "mask" li toglie (token_mask False); "impute" li sostituisce con
       media / categoria piu' frequente del training del fold (buffer); "indicator" con un token "mancante"
       appreso per variabile. Con impute / indicator tutti i token sono presenti;
     - ritorna (tokens (B,T,dim), token_mask (B,T) bool: True = token usato per quel paziente)."""
-    def __init__(self, n_numerical, cat_cardinalities, dim, missing="mask"):
+    def __init__(self, n_numerical, cat_cardinalities, dim, missing="mask", ordinal=None):
         super().__init__()
         if missing not in ("mask", "impute", "indicator"):
             raise ValueError(f"clinical_missing {missing}: mask | impute | indicator")
@@ -175,6 +230,18 @@ class ClinicalFeatureTokenizer(nn.Module):
             nn.init.normal_(emb.weight, std=0.02)
             with torch.no_grad():
                 emb.weight[0].zero_()
+        # ordinal: one bool per categorical column (None / all False = every column embedded, as before);
+        # the embeddings of the ordinal columns stay in the model, unused (same state_dict layout)
+        if ordinal is None or not any(ordinal):
+            self.ordinal = None
+        else:
+            if len(ordinal) != len(cat_cardinalities):
+                raise ValueError("clinical ordinal: one flag per categorical column")
+            self.register_buffer("ordinal", torch.tensor(list(ordinal), dtype=torch.bool), persistent=False)
+            self.register_buffer("cat_cardinalities", torch.tensor(list(cat_cardinalities), dtype=torch.float32),
+                                 persistent=False)
+            self.ord_scale = nn.Parameter(torch.randn(len(cat_cardinalities), dim) * 0.02)
+            self.ord_bias = nn.Parameter(torch.zeros(len(cat_cardinalities), dim))
 
     def forward(self, num, cat, num_mask):
         """num (B,n_num) float grezzo | cat (B,n_cat) long, 0=mancante | num_mask (B,n_num) bool"""
@@ -189,6 +256,12 @@ class ClinicalFeatureTokenizer(nn.Module):
         num_tokens = num.unsqueeze(-1) * self.num_scale + self.num_bias
         num_tokens = num_tokens * num_mask.unsqueeze(-1)            # mancante -> vettore nullo
         cat_tokens = torch.stack([e(cat[:, i]) for i, e in enumerate(self.cat_embeddings)], dim=1)
+        ordinal = getattr(self, "ordinal", None)                    # checkpoints older than the flag
+        if ordinal is not None:
+            # rank in [-1, 1]; a missing value (cat 0) -> zero vector, as a missing numerical value
+            level = (cat - 1).clamp(min=0).to(num_tokens.dtype) / (self.cat_cardinalities - 1).clamp(min=1) * 2 - 1
+            ord_tokens = (level.unsqueeze(-1) * self.ord_scale + self.ord_bias) * (cat > 0).unsqueeze(-1)
+            cat_tokens = torch.where(ordinal[None, :, None], ord_tokens, cat_tokens)
         tokens = torch.cat([num_tokens, cat_tokens], dim=1)         # (B, n_num+n_cat, dim)
         if missing == "mask":
             return tokens, observed
@@ -224,6 +297,7 @@ class OXA_MISS_final(nn.Module):
                     xa_fusion=True,
                     clinical_n_numerical=1,                     # eta'
                     clinical_cat_cardinalities=None,            # None -> DEFAULT_CAT_CARDINALITIES (sex, stage, T, N, M)
+                    clinical_cat_names=None,                    # nomi delle colonne categoriche (main.py); None -> DEFAULT_CAT_NAMES
                     clinical_token_dropout=0.15,
                     clinical_xa=True,                           # clinica nella cross-attention (False: ablation, come OXA_MISS)
                     # --- ablation flags (default = modello proposto) ---
@@ -236,6 +310,32 @@ class OXA_MISS_final(nn.Module):
                                                     # separata, sommata ai logit (la clinica non passa dal core ne' dall'hub)
                     xa_update="mean_ln",            # mean_ln: LN(x + media degli update) | sum: x + somma (OXA_MISS)
                     clinical_missing="mask",        # mask | impute | indicator
+                    clinical_ordinal=False,         # True: stage, T, N, M come rango numerico (un token lineare) invece
+                                                    # che embedding di categoria (ORDINAL_CAT_NAMES; sex / study restano embedding)
+                    genomics_reduce="mean",         # pathway tokens -> genomics embedding: mean (scale independent of the
+                                                    # number of pathways, e.g. 5 groups vs 50 Hallmark) | sum (before 2026-10-27)
+                    # --- radiology (2026-10, docs/ablation_plan_v2.md S6) ---
+                    rad_gate="sigmoid",             # sigmoid: content gates of the hub | tanh_zero: zero-initialized tanh gate on
+                                                    # the whole hub residual (exact backbone at init / without radiology)
+                    radiology_occ_bias=False,       # log(organ_fraction + 1e-3) added to the radiology pooling logits
+                    radiology_pos_enc=False,        # sinusoidal 3-D position of each token in the exam's grid -> Linear (zero init)
+                    radiology_ablate_features=False,  # shortcut control: CT / MRI token features set to zero (presence kept)
+                    # --- missingness / distillation (S3) ---
+                    modality_dropout=0.0,           # training: each available modality of modality_dropout_modalities dropped
+                                                    # with this probability (the patient keeps >= 1 modality)
+                    modality_dropout_modalities=("WSI", "Genomics", "Clinical"),
+                    self_distill_weight=0.0,        # > 0: complete -> dropped self-distillation (teacher = the same model in eval
+                                                    # mode on every available modality, no gradient) when a modality was dropped
+                    self_distill_repr_weight=0.1,   # weight of the representation term (MSE of the layer-normed fused vectors)
+                    # --- alternative backbones (S1b) ---
+                    fusion_core="xa",               # xa: pairwise cross-attention + modality vectors + fusion_type |
+                                                    # bottleneck: MBT (Nagrani et al. 2021), core vector = mean of the bottleneck tokens
+                    bottleneck_tokens=8,
+                    bottleneck_layers=2,
+                    wsi_encoder="patches",          # patches: patch features | gmm: (K, 1 + 2 input_dim) GMM prototypes of the
+                                                    # patient (data_loader.wsi_representation gmm, utils/fit_wsi_gmm.py):
+                                                    # [pi, mu, log var] -> Linear -> LN + learned prototype embedding
+                    gmm_components=32,
                     # --- module A: probabilistic fusion (fusion_type="poe") ---
                     poe_kl_weight=1e-3,             # KL(posterior || N(0, I)) in the loss
                     poe_subset_dropout=0.3,         # training: each available expert dropped with this probability (>= 1 kept)
@@ -258,7 +358,13 @@ class OXA_MISS_final(nn.Module):
         # set by ModelManager to save them).
         self.xa_fusion = xa_fusion
         self.return_xa_attentions = False
-        self.inner_proj = nn.Linear(input_dim, inner_dim)
+        if wsi_encoder not in ("patches", "gmm"):
+            raise ValueError(f"wsi_encoder {wsi_encoder}: patches | gmm")
+        self.wsi_encoder = wsi_encoder
+        self.inner_proj = nn.Linear(input_dim if wsi_encoder == "patches" else 1 + 2 * input_dim, inner_dim)
+        if wsi_encoder == "gmm":
+            self.gmm_norm = nn.LayerNorm(inner_dim)
+            self.gmm_position = nn.Parameter(torch.randn(gmm_components, inner_dim) * 0.02)
         self.use_layernorm = use_layernorm
         self.fusion_type = fusion_type
         self.genomics_group_name = genomics_group_name
@@ -272,23 +378,31 @@ class OXA_MISS_final(nn.Module):
         self.wsi_dropout = nn.Dropout(wsi_dropout)
         self.dropout = nn.Dropout(dropout)
 
+        if fusion_core not in ("xa", "bottleneck"):
+            raise ValueError(f"fusion_core {fusion_core}: xa | bottleneck")
+        self.fusion_core = fusion_core
+        # fusion_core bottleneck (MBT) replaces the WSI latent-query pooling, the pairwise cross-attention and the
+        # concatenation projection: those modules are built only with fusion_core xa
+        xa_core = fusion_core == "xa"
         if self.use_layernorm:
             self.layernorm = nn.LayerNorm(inner_dim)
-            self.layernorm_latent = nn.LayerNorm(inner_dim)
-        self.latent_queries = nn.Parameter(torch.randn(num_latent_queries, inner_dim))
-        # gated attention keys: tanh(V h) * sigmoid(U h); wsi_gated_keys=False: linear keys V h
+            if xa_core:
+                self.layernorm_latent = nn.LayerNorm(inner_dim)
         self.wsi_gated_keys = wsi_gated_keys
-        self.attention_V = nn.Linear(inner_dim, inner_dim)
-        if wsi_gated_keys:
-            self.attention_U = nn.Linear(inner_dim, inner_dim)
-        self.fc = nn.Linear(num_latent_queries*inner_dim, inner_dim)
+        if xa_core:
+            self.latent_queries = nn.Parameter(torch.randn(num_latent_queries, inner_dim))
+            # gated attention keys: tanh(V h) * sigmoid(U h); wsi_gated_keys=False: linear keys V h
+            self.attention_V = nn.Linear(inner_dim, inner_dim)
+            if wsi_gated_keys:
+                self.attention_U = nn.Linear(inner_dim, inner_dim)
+            self.fc = nn.Linear(num_latent_queries*inner_dim, inner_dim)
 
         # cross-attention: one block per (query <- context) pair of the token modalities, and one LayerNorm per
         # query modality applied after the residual update (scale independent of the available contexts)
         self.clinical_xa = clinical_xa and 'Clinical' in input_modalities
         xa_modalities = [m for m, name in (("patches", "WSI"), ("genomics", "Genomics"), ("clinical", "Clinical"))
                          if name in input_modalities and (name != "Clinical" or self.clinical_xa)]
-        self.xa_pairs = [(q, c) for q in xa_modalities for c in xa_modalities if q != c]
+        self.xa_pairs = [(q, c) for q in xa_modalities for c in xa_modalities if q != c] if xa_core else []
         if xa_graph not in ("full", "wsi_star"):
             raise ValueError(f"xa_graph {xa_graph}: full | wsi_star")
         self.xa_graph = xa_graph
@@ -305,13 +419,14 @@ class OXA_MISS_final(nn.Module):
 
         # radiology: region tokens -> projection -> gated attention pooling (K summarizing tokens), trained
         # end-to-end; they enter the model through the radiology hub (or as PoE experts)
-        if clinical_fusion not in ("core", "late_logit"):
-            raise ValueError(f"clinical_fusion {clinical_fusion}: core | late_logit")
-        if clinical_fusion == "late_logit" and fusion_type == "poe":
-            raise ValueError("clinical_fusion=late_logit non e' supportato con fusion_type poe")
+        if clinical_fusion not in ("core", "late_logit", "film"):
+            raise ValueError(f"clinical_fusion {clinical_fusion}: core | late_logit | film")
+        if clinical_fusion in ("late_logit", "film") and fusion_type == "poe":
+            raise ValueError(f"clinical_fusion={clinical_fusion} non e' supportato con fusion_type poe")
+        # PoE with the Cox head (output_dim 1): the risk is the log hazard ratio of the head (_risk)
         self.clinical_fusion = clinical_fusion
         self.core_modalities = [m for m in ("WSI", "Genomics", "Clinical") if m in input_modalities
-                                and not (m == "Clinical" and clinical_fusion == "late_logit")]
+                                and not (m == "Clinical" and clinical_fusion in ("late_logit", "film"))]
         self.radiology_modalities = [m for m in ("CT", "MRI") if m in input_modalities]
         self.radiology_dropout = radiology_dropout
         rad_dims = {"CT": ct_emb_dim, "MRI": mri_emb_dim}
@@ -319,18 +434,43 @@ class OXA_MISS_final(nn.Module):
         self.radiology_proj = nn.ModuleDict({m: nn.Linear(rad_dims[m], inner_dim) for m in self.radiology_modalities})
         if radiology_pooling not in ("attention", "mean"):
             raise ValueError(f"radiology_pooling {radiology_pooling}: attention | mean")
+        if radiology_occ_bias and radiology_pooling != "attention":
+            raise ValueError("radiology_occ_bias needs radiology_pooling attention")
         self.radiology_pooling = radiology_pooling
+        self.radiology_occ_bias, self.radiology_pos_enc = radiology_occ_bias, radiology_pos_enc
+        self.radiology_ablate_features = radiology_ablate_features
+        if radiology_pos_enc:
+            # zero init: the variant starts from the model without positions
+            self.radiology_pe = nn.ModuleDict({m: nn.Linear(6 * 8, inner_dim) for m in self.radiology_modalities})
+            for layer in self.radiology_pe.values():
+                nn.init.zeros_(layer.weight); nn.init.zeros_(layer.bias)
         if radiology_pooling == "attention":
             self.radiology_pool = nn.ModuleDict({m: GatedAttentionPooling(inner_dim, rad_queries[m])
                                                  for m in self.radiology_modalities})
         if 'Clinical' in self.input_modalities:
             if clinical_cat_cardinalities is None:
                 clinical_cat_cardinalities = DEFAULT_CAT_CARDINALITIES
+            if clinical_cat_names is None:
+                if clinical_ordinal and len(clinical_cat_cardinalities) != len(DEFAULT_CAT_NAMES):
+                    raise ValueError("clinical_ordinal: clinical_cat_names needed (categorical columns differ from the default)")
+                clinical_cat_names = DEFAULT_CAT_NAMES[:len(clinical_cat_cardinalities)]
+            ordinal = [name in ORDINAL_CAT_NAMES for name in clinical_cat_names] if clinical_ordinal else None
+            if clinical_ordinal and not any(ordinal):
+                raise ValueError(f"clinical_ordinal: no ordinal column among {clinical_cat_names}")
+            self.clinical_ordinal = clinical_ordinal
             self.clinical_token_dropout = clinical_token_dropout
             self.clinical_tokenizer = ClinicalFeatureTokenizer(
-                clinical_n_numerical, clinical_cat_cardinalities, inner_dim, missing=clinical_missing)
+                clinical_n_numerical, clinical_cat_cardinalities, inner_dim, missing=clinical_missing, ordinal=ordinal)
             self.clinical_norm = nn.LayerNorm(inner_dim)
         self.genomics_single_token = genomics_single_token
+        if genomics_reduce not in ("mean", "sum"):
+            raise ValueError(f"genomics_reduce {genomics_reduce}: mean | sum")
+        self.genomics_reduce = genomics_reduce
+        unknown = set(modality_dropout_modalities) - {"WSI", "Genomics", "Clinical"}
+        if unknown:
+            raise ValueError(f"modality_dropout_modalities {sorted(unknown)}: only WSI, Genomics, Clinical (CT / MRI: radiology_dropout)")
+        self.modality_dropout, self.modality_dropout_modalities = modality_dropout, list(modality_dropout_modalities)
+        self.self_distill_weight, self.self_distill_repr_weight = self_distill_weight, self_distill_repr_weight
         if "Genomics" in self.input_modalities and genomics_single_token:
             # one MLP over all the genes of the groups (PORPOISE-style): a single genomics token
             self.genomic_encoder = nn.ModuleDict({"all": nn.Sequential(
@@ -353,12 +493,12 @@ class OXA_MISS_final(nn.Module):
         # core vector (WSI / Genomics / Clinical) -> radiology hub -> head on inner_dim
         if fusion_type not in ("concatenate", "sum", "poe"):
             raise ValueError("Invalid fusion type. Choose between 'concatenate', 'sum' or 'poe'.")
-        if fusion_type == "concatenate" and self.core_modalities:
+        if fusion_type == "concatenate" and self.core_modalities and xa_core:
             # [e_WSI | e_Genomics | e_Clinical] (zeros for a missing one) -> inner_dim
             self.core_compress = nn.Linear(inner_dim * len(self.core_modalities), inner_dim)
         # radiology hub with concatenate / sum; with poe CT / MRI are experts of the product (value of acquisition)
         self.uses_hub = bool(self.radiology_modalities) and fusion_type != "poe"
-        self.radiology_hub = RadiologyHub(inner_dim, self.radiology_modalities) if self.uses_hub else None
+        self.radiology_hub = RadiologyHub(inner_dim, self.radiology_modalities, gate=rad_gate) if self.uses_hub else None
         self.multilevel_loss = multilevel_loss and self.uses_hub and fusion_type != "poe"
         self.multilevel_aux_weight, self.multilevel_consistency_weight = multilevel_aux_weight, multilevel_consistency_weight
         if fusion_type == "poe":
@@ -377,9 +517,30 @@ class OXA_MISS_final(nn.Module):
                 nn.Linear(2 * inner_dim + n_mod, inner_dim), nn.ReLU(), nn.Linear(inner_dim, 3 * inner_dim))
                 for m in self.poe_modalities})
 
+        if fusion_core == "bottleneck":
+            # MBT: per layer and modality its own pre-LN transformer layer over [modality tokens; bottleneck tokens];
+            # the bottleneck tokens of the next layer are the mean over the available modalities (unchanged if none)
+            if fusion_type != "concatenate":
+                raise ValueError("fusion_core bottleneck replaces fusion_type: leave it at concatenate")
+            names = [n for n, m in (("patches", "WSI"), ("genomics", "Genomics"), ("clinical", "Clinical")) if m in self.core_modalities]
+            self.bottleneck_init = nn.Parameter(torch.randn(1, bottleneck_tokens, inner_dim) * 0.02)
+            # chunked attention: the WSI sequence is every patch of the slides at evaluation (up to ~20k tokens)
+            self.bottleneck_blocks = nn.ModuleList([nn.ModuleDict({n: ChunkedSelfAttentionLayer(inner_dim, heads=4, ff_mult=2, dropout=0.1)
+                for n in names}) for _ in range(bottleneck_layers)])
+            self.bottleneck_norm = nn.LayerNorm(inner_dim)
         self.output_layer = nn.Linear(inner_dim, output_dim)
         if clinical_fusion == "late_logit" and 'Clinical' in input_modalities:
             self.clinical_head = nn.Linear(inner_dim, output_dim)   # contributo additivo (nei logit) della clinica
+        if clinical_fusion == "film" and 'Clinical' in input_modalities:
+            # FT-Transformer-style summary of the clinical tokens: a learned [CLS] token + one pre-LN transformer
+            # layer over [CLS; observed tokens]; c = LN(CLS output) modulates the core vector before and after the
+            # radiology hub (FiLM, Perez et al. 2018): x * (1 + gamma(c)) + beta(c), gamma / beta zero-initialized
+            self.clinical_cls = nn.Parameter(torch.randn(1, 1, inner_dim) * 0.02)
+            self.clinical_encoder = nn.TransformerEncoderLayer(inner_dim, nhead=4, dim_feedforward=2 * inner_dim, dropout=0.1,
+                                                               batch_first=True, norm_first=True)
+            self.film = nn.ModuleList([nn.Linear(inner_dim, 2 * inner_dim) for _ in range(2)])   # before / after the hub
+            for layer in self.film:
+                nn.init.zeros_(layer.weight); nn.init.zeros_(layer.bias)
         self._init_adversary(inner_dim, shortcut_adversary_weight, shortcut_adversary_target, n_studies, n_cancer_types,
                              clinical_n_numerical, clinical_cat_cardinalities or DEFAULT_CAT_CARDINALITIES, n_sites)
 
@@ -472,7 +633,10 @@ class OXA_MISS_final(nn.Module):
         return pred_mu, pred_spread.clamp(*self.POE_LOGVAR_RANGE), pred_logvar.clamp(*self.POE_LOGVAR_RANGE)
 
     def _risk(self, logits):
-        """Same risk as ModelManager.calculate_risk: -sum of the survival curve."""
+        """Same risk as ModelManager.calculate_risk: -sum of the survival curve; Cox head (output_dim 1): the log
+        hazard ratio."""
+        if logits.shape[-1] == 1:
+            return logits[..., 0]
         return -torch.cumprod(1 - torch.sigmoid(logits), dim=-1).sum(dim=-1)
 
     def _risk_samples(self, mu, logvar, n):
@@ -544,7 +708,78 @@ class OXA_MISS_final(nn.Module):
         emptied = ~dropped.any(dim=1) & token_mask.any(dim=1)       # pazienti rimasti senza token
         return torch.where(emptied.unsqueeze(1), token_mask, dropped)
 
+    def _event_distribution(self, logits):
+        """Discrete event distribution of the hazard logits: p_j = h_j S_{j-1}, j = 1..J, and p_{J+1} = S_J."""
+        hazards = torch.sigmoid(logits)
+        survival = torch.cumprod(1 - hazards, dim=-1)
+        before = torch.cat([torch.ones_like(survival[..., :1]), survival[..., :-1]], dim=-1)
+        return torch.cat([hazards * before, survival[..., -1:]], dim=-1).clamp(min=1e-7)
+
     def forward(self, data):
+        """_forward, plus (training, self_distill_weight > 0, a modality dropped by modality_dropout /
+        radiology_dropout) the complete -> dropped self-distillation in aux_loss: the teacher is the same model in
+        eval mode on every available modality, without gradient; the student this forward.
+        Cox head: MSE of the log hazard ratios; discrete head: KL(teacher || student) of the event distributions.
+        Plus self_distill_repr_weight * MSE of the layer-normed fused vectors (input of the head)."""
+        output, fused, dropped = self._forward(data)
+        weight = getattr(self, "self_distill_weight", 0.0)
+        if self.training and weight > 0 and dropped:
+            self.eval()
+            try:
+                with torch.no_grad():
+                    teacher, teacher_fused, _ = self._forward(data)
+            finally:
+                self.train()
+            student_out, teacher_out = output["output"], teacher["output"]
+            if student_out.shape[-1] == 1:
+                loss = F.mse_loss(student_out, teacher_out)
+            else:
+                p_t, p_s = self._event_distribution(teacher_out), self._event_distribution(student_out)
+                loss = (p_t * (p_t.log() - p_s.log())).sum(dim=-1).mean()
+            d = fused.shape[-1]
+            loss = loss + self.self_distill_repr_weight * F.mse_loss(F.layer_norm(fused, (d,)), F.layer_norm(teacher_fused, (d,)))
+            output["aux_loss"] = weight * loss + output.get("aux_loss", 0.0)
+            output["self_distill_loss"] = loss.detach()
+        return output
+
+    def _modality_dropout(self, on):
+        """Training: each available modality of modality_dropout_modalities is dropped with probability
+        modality_dropout; if that would leave the patient without any modality, one dropped modality is restored.
+        on {modality: available} -> (on after the dropout, whether one was dropped)."""
+        p = getattr(self, "modality_dropout", 0.0)
+        if not self.training or p <= 0:
+            return on, False
+        dropped = [m for m in getattr(self, "modality_dropout_modalities", []) if on.get(m) and torch.rand(()) < p]
+        if dropped and not any(v for m, v in on.items() if m not in dropped):
+            dropped.pop(int(torch.randint(len(dropped), ())))
+        return {m: v and m not in dropped for m, v in on.items()}, bool(dropped)
+
+    def _bottleneck_fusion(self, tokens, batch_size):
+        """MBT fusion. tokens {name: (x (B, N, D), mask (B, N) True = valid, or None)} of the available modalities
+        -> ({name: updated tokens}, LN(mean of the final bottleneck tokens) (B, D))."""
+        n_b = self.bottleneck_init.shape[1]
+        b = self.bottleneck_init.expand(batch_size, -1, -1)
+        updated = {n: x for n, (x, _) in tokens.items()}
+        for layers in self.bottleneck_blocks:
+            outs = []
+            for n, (_, mask) in tokens.items():
+                pad = None if mask is None else torch.cat([~mask, torch.zeros_like(mask[:, :1]).expand(-1, n_b)], dim=1)
+                y = layers[n](torch.cat([updated[n], b], dim=1), key_padding_mask=pad)
+                updated[n], b_n = y[:, :-n_b], y[:, -n_b:]
+                outs.append(b_n)
+            if outs:
+                b = torch.stack(outs, dim=0).mean(dim=0)
+        return updated, self.bottleneck_norm(b.mean(dim=1))
+
+    def _film(self, i, x, c):
+        """FiLM of the clinical summary c on x (clinical_fusion film): x * (1 + gamma) + beta; identity without c."""
+        if c is None:
+            return x
+        gamma, beta = self.film[i](c).chunk(2, dim=-1)
+        return x * (1 + gamma) + beta
+
+    def _forward(self, data):
+        """-> (output dict, fused vector = input of the head before dropout, whether a modality was dropped)."""
         if data["WSI_status"].numel() != 1:
             raise ValueError("OXA_MISS_final: batch di un paziente (data_loader.batch_size: 1)")
         # modality availability, read once (each .item() on a GPU tensor is a device sync)
@@ -553,14 +788,28 @@ class OXA_MISS_final(nn.Module):
         ct_on = "CT" in self.input_modalities and bool(data["ct_status"].item())
         mri_on = "MRI" in self.input_modalities and bool(data["mri_status"].item())
         clinical_on = "Clinical" in self.input_modalities and bool(data["clinical_status"].item())
+        # training: whole-modality dropout of WSI / Genomics / Clinical (CT / MRI: radiology_dropout below)
+        on, dropped_any = self._modality_dropout({"WSI": wsi_on, "Genomics": genomics_on, "Clinical": clinical_on,
+                                                  "CT": ct_on, "MRI": mri_on})
+        wsi_on, genomics_on, clinical_on = on["WSI"], on["Genomics"], on["Clinical"]
         # Extract patch features
         if wsi_on:
             patch_embeddings = data['patch_features']
             mask = data['mask']
             patch_embeddings = patch_embeddings[~mask.bool()].unsqueeze(0)
-            patch_embeddings = self.inner_proj(patch_embeddings)
+            if getattr(self, "wsi_encoder", "patches") == "gmm":
+                # prototypes [pi | mu | var] (1, K, 1 + 2 D): variances on a log scale, then one token per component
+                d = (patch_embeddings.shape[-1] - 1) // 2
+                pi, mu, var = patch_embeddings.split([1, d, d], dim=-1)
+                features = torch.cat([pi, mu, torch.log(var + 1e-6)], dim=-1)
+                patch_embeddings = self.gmm_norm(self.inner_proj(features)) + self.gmm_position
+            else:
+                patch_embeddings = self.inner_proj(patch_embeddings)
 
-            if self.use_layernorm:
+            if getattr(self, "fusion_core", "xa") == "bottleneck":   # MBT: no latent-query pooling
+                if self.use_layernorm:
+                    patch_embeddings = self.layernorm(patch_embeddings)
+            elif self.use_layernorm:
                 patch_embeddings = self.layernorm(patch_embeddings)
                 latent_queries = self.layernorm_latent(self.latent_queries)
             else:
@@ -569,18 +818,33 @@ class OXA_MISS_final(nn.Module):
         # end-to-end; in training each available exam is dropped with radiology_dropout, so that its presence
         # is not a reliable signal
         radiology_tokens, radiology_raw = {}, {}
+        occ_bias, pos_enc = getattr(self, "radiology_occ_bias", False), getattr(self, "radiology_pos_enc", False)
         for modality, on, key in (("CT", ct_on, "ct_features"), ("MRI", mri_on, "mri_features")):
             if not on:
                 continue
             raw = data[key].reshape(data[key].shape[0], -1, data[key].shape[-1])
             radiology_raw[modality] = raw
             if self.training and torch.rand(()) < self.radiology_dropout:
+                dropped_any = True
                 continue
+            if getattr(self, "radiology_ablate_features", False):   # shortcut control: presence without content
+                raw = torch.zeros_like(raw)
             projected = self.radiology_proj[modality](raw)
+            meta = None
+            if occ_bias or pos_enc:   # (B, N, 4): x, y, z in [0, 1] of the exam's token grid, organ fraction
+                meta_key = key.replace("_features", "_token_meta")
+                if meta_key not in data:
+                    raise KeyError(f"radiology_occ_bias / radiology_pos_enc: {meta_key} missing (data_loader.radiology_token_meta)")
+                meta = data[meta_key].reshape(raw.shape[0], -1, 4).to(projected.dtype)
+                if meta.shape[1] != projected.shape[1]:
+                    raise ValueError(f"{meta_key}: {meta.shape[1]} entries for {projected.shape[1]} {modality} tokens")
+            if pos_enc:
+                projected = projected + self.radiology_pe[modality](sinusoidal_3d(meta[..., :3]))
             if getattr(self, "radiology_pooling", "attention") == "mean":    # checkpoints older than the flag
                 radiology_tokens[modality] = projected.mean(dim=1, keepdim=True)     # (B, 1, dim)
             else:
-                radiology_tokens[modality], _ = self.radiology_pool[modality](projected)
+                bias = torch.log(meta[..., 3] + 1e-3) if occ_bias else None
+                radiology_tokens[modality], _ = self.radiology_pool[modality](projected, bias=bias)
         ct_on, mri_on = "CT" in radiology_tokens, "MRI" in radiology_tokens
         if clinical_on:
             if not bool(self.clinical_tokenizer.normalization_set):
@@ -603,60 +867,80 @@ class OXA_MISS_final(nn.Module):
                     genomics_groups.append(genomics_group_i)
                 genomics_embedding = torch.stack(genomics_groups, dim=1)
 
-        # cross-attention on the pre-fusion tokens of each modality: (tokens, mask of the valid tokens)
-        tokens = {}
-        if wsi_on:
-            tokens["patches"] = (patch_embeddings, None)
-        if genomics_on:
-            tokens["genomics"] = (genomics_embedding, None)
-        if clinical_on and self.clinical_xa:
-            tokens["clinical"] = (clinical_tokens, clinical_token_mask)
-        # getattr: models pickled before these options existed keep their original behaviour
-        xa_fusion = getattr(self, "xa_fusion", False)
-        compute_xa = xa_fusion or getattr(self, "return_xa_attentions", False)
-        XA_attentions = {}
-        updated = {name: x for name, (x, _) in tokens.items()}
-        # getattr: checkpoints pickled before the ablation flags existed keep the defaults
-        xa_update = getattr(self, "xa_update", "mean_ln")
-        if compute_xa:
-            for query in tokens:
-                updates = []
-                for q, context in self.xa_pairs:
-                    if q != query or context not in tokens:
-                        continue
-                    block = self.xa_blocks[q if getattr(self, "xa_shared_blocks", False) else f"{q}_to_{context}"]
-                    update, att = block(tokens[query][0], *tokens[context])
-                    updates.append(update)
-                    XA_attentions[f"att_{query}_to_{context}"] = att.detach()
-                if xa_fusion and xa_update == "mean_ln" and query in self.xa_norms:
-                    # mean of the updates of the available contexts + LayerNorm, also without contexts:
-                    # the scale of the modality does not depend on how many modalities the patient has
-                    residual = torch.stack(updates, dim=0).mean(dim=0) if updates else 0
-                    updated[query] = self.xa_norms[query](tokens[query][0] + residual)
-                elif xa_fusion and xa_update == "sum" and updates:
-                    updated[query] = tokens[query][0] + torch.stack(updates, dim=0).sum(dim=0)   # OXA_MISS
-            if "clinical" in tokens:
-                # variables of the clinical tokens of the att_*clinical* maps (order: numerical, categorical)
-                XA_attentions["clinical_token_mask"] = clinical_token_mask.detach()
+        bottleneck = getattr(self, "fusion_core", "xa") == "bottleneck"
+        if bottleneck:
+            # MBT: the token sequences exchange information only through the shared bottleneck tokens
+            XA_attentions, A_out = {}, None
+            mbt_in = {}
+            if wsi_on:
+                mbt_in["patches"] = (patch_embeddings, None)
+            if genomics_on:
+                mbt_in["genomics"] = (genomics_embedding, None)
+            if clinical_on and "Clinical" in self.core_modalities:
+                mbt_in["clinical"] = (clinical_tokens, clinical_token_mask)
+            updated, bottleneck_vector = self._bottleneck_fusion(mbt_in, data['patch_features'].shape[0])
+            if wsi_on:
+                wsi_embedding = updated["patches"].mean(dim=1)
+            if genomics_on:
+                genomics_embedding = updated["genomics"].mean(dim=1)
+        else:
+            # cross-attention on the pre-fusion tokens of each modality: (tokens, mask of the valid tokens)
+            tokens = {}
+            if wsi_on:
+                tokens["patches"] = (patch_embeddings, None)
+            if genomics_on:
+                tokens["genomics"] = (genomics_embedding, None)
+            if clinical_on and self.clinical_xa:
+                tokens["clinical"] = (clinical_tokens, clinical_token_mask)
+            # getattr: models pickled before these options existed keep their original behaviour
+            xa_fusion = getattr(self, "xa_fusion", False)
+            compute_xa = xa_fusion or getattr(self, "return_xa_attentions", False)
+            XA_attentions = {}
+            updated = {name: x for name, (x, _) in tokens.items()}
+            # getattr: checkpoints pickled before the ablation flags existed keep the defaults
+            xa_update = getattr(self, "xa_update", "mean_ln")
+            if compute_xa:
+                for query in tokens:
+                    updates = []
+                    for q, context in self.xa_pairs:
+                        if q != query or context not in tokens:
+                            continue
+                        block = self.xa_blocks[q if getattr(self, "xa_shared_blocks", False) else f"{q}_to_{context}"]
+                        update, att = block(tokens[query][0], *tokens[context])
+                        updates.append(update)
+                        XA_attentions[f"att_{query}_to_{context}"] = att.detach()
+                    if xa_fusion and xa_update == "mean_ln" and query in self.xa_norms:
+                        # mean of the updates of the available contexts + LayerNorm, also without contexts:
+                        # the scale of the modality does not depend on how many modalities the patient has
+                        residual = torch.stack(updates, dim=0).mean(dim=0) if updates else 0
+                        updated[query] = self.xa_norms[query](tokens[query][0] + residual)
+                    elif xa_fusion and xa_update == "sum" and updates:
+                        updated[query] = tokens[query][0] + torch.stack(updates, dim=0).sum(dim=0)   # OXA_MISS
+                if "clinical" in tokens:
+                    # variables of the clinical tokens of the att_*clinical* maps (order: numerical, categorical)
+                    XA_attentions["clinical_token_mask"] = clinical_token_mask.detach()
 
-        if wsi_on:
-            pooled_patches = updated["patches"]  # embeddings pooled by the latent queries
-            # gate and keys from the same (cross-attention updated) patches
-            if getattr(self, "wsi_gated_keys", True):
-                keys = torch.tanh(self.attention_V(pooled_patches)) * torch.sigmoid(self.attention_U(pooled_patches))
-            else:
-                keys = self.attention_V(pooled_patches)
-            scores = torch.matmul(latent_queries, keys.transpose(1, 2)) / keys.size(-1) ** 0.5   # (1, Q, N)
-            A_out = scores                                   # pre-softmax (AEM entropy loss)
-            weights = self.wsi_dropout(F.softmax(scores, dim=-1))
-            latent = torch.matmul(weights, pooled_patches)
-            latent = latent.flatten(start_dim=1)
+            if wsi_on:
+                pooled_patches = updated["patches"]  # embeddings pooled by the latent queries
+                # gate and keys from the same (cross-attention updated) patches
+                if getattr(self, "wsi_gated_keys", True):
+                    keys = torch.tanh(self.attention_V(pooled_patches)) * torch.sigmoid(self.attention_U(pooled_patches))
+                else:
+                    keys = self.attention_V(pooled_patches)
+                scores = torch.matmul(latent_queries, keys.transpose(1, 2)) / keys.size(-1) ** 0.5   # (1, Q, N)
+                A_out = scores                                   # pre-softmax (AEM entropy loss)
+                weights = self.wsi_dropout(F.softmax(scores, dim=-1))
+                latent = torch.matmul(weights, pooled_patches)
+                latent = latent.flatten(start_dim=1)
 
-            #Extract high level features
-            wsi_embedding = self.fc(latent)
+                #Extract high level features
+                wsi_embedding = self.fc(latent)
 
-        if genomics_on:
-            genomics_embedding = updated["genomics"].sum(dim=1, keepdim=False)
+            if genomics_on:
+                if getattr(self, "genomics_reduce", "sum") == "mean":   # checkpoints older than the flag: sum
+                    genomics_embedding = updated["genomics"].mean(dim=1)
+                else:
+                    genomics_embedding = updated["genomics"].sum(dim=1, keepdim=False)
 
         if clinical_on:
             clinical_updated = updated.get("clinical", clinical_tokens)
@@ -664,6 +948,14 @@ class OXA_MISS_final(nn.Module):
             weights = clinical_token_mask.unsqueeze(-1).to(clinical_updated.dtype)
             clinical_mean = (clinical_updated * weights).sum(dim=1) / weights.sum(dim=1).clamp(min=1)
             clinical_embedding = self.clinical_norm(clinical_mean)
+        film_c = None
+        if clinical_on and getattr(self, "clinical_fusion", "core") == "film":
+            # [CLS; clinical tokens] -> transformer layer (observed tokens only) -> LN(CLS) = clinical summary
+            cls = self.clinical_cls.expand(clinical_updated.shape[0], -1, -1)
+            seq = torch.cat([cls, clinical_updated], dim=1)
+            padding = torch.cat([torch.zeros_like(clinical_token_mask[:, :1]), ~clinical_token_mask], dim=1)
+            film_c = self.clinical_norm(self.clinical_encoder(seq, src_key_padding_mask=padding)[:, 0])
+            clinical_embedding = film_c
 
         # zero embedding, created directly on the inputs' device (no CPU -> GPU copy)
         missing_embedding = lambda: torch.zeros((data['patch_features'].shape[0], self.inner_proj.out_features),
@@ -689,16 +981,20 @@ class OXA_MISS_final(nn.Module):
         else:
             # core vector: "concatenate" -> [e_WSI | e_Genomics | e_Clinical] (zeros if missing) -> inner_dim;
             # "sum" -> mean of the available core modalities
-            if self.fusion_type == "sum":
+            if bottleneck:   # mean of the bottleneck tokens (fusion_core bottleneck)
+                x = bottleneck_vector
+            elif self.fusion_type == "sum":
                 x = torch.stack(list(core.values()), dim=0).mean(dim=0) if core else missing_embedding()
             elif self.core_modalities:
                 x = self.core_compress(torch.cat([core.get(m, missing_embedding()) for m in self.core_modalities], dim=1))
             else:
                 x = missing_embedding()
+            x = self._film(0, x, film_c)
             core_vector = x
         if self.uses_hub:
             # radiology hub: core query, pooled CT / MRI tokens as context (same LN / FF path without radiology)
             x, hub_attention = self.radiology_hub(x, radiology_tokens)
+            x = self._film(1, x, film_c)
             if hub_attention is not None:
                 XA_attentions["att_core_to_radiology"] = hub_attention.detach()
             if self.training and self.multilevel_loss and radiology_tokens:
@@ -708,6 +1004,7 @@ class OXA_MISS_final(nn.Module):
                 for r in range(len(names)):
                     for subset in itertools.combinations(names, r):
                         h, _ = self.radiology_hub(core_vector, {m: radiology_tokens[m] for m in subset})
+                        h = self._film(1, h, film_c)
                         sub_logits[frozenset(subset)] = self.output_layer(self.dropout(h)) + late_clinical
                 multilevel = (names, sub_logits)
         # fused / per-modality representations, for the shortcut probes (utils/shortcut_analysis.py)
@@ -739,6 +1036,7 @@ class OXA_MISS_final(nn.Module):
             aux_loss = adversary_loss if aux_loss is None else aux_loss + adversary_loss
 
         # Output layer
+        fused = x
         x = self.dropout(x)
         logits = self.output_layer(x) + late_clinical  # Shape: (batch_size, output_dim)
 
@@ -752,14 +1050,14 @@ class OXA_MISS_final(nn.Module):
             output['multilevel'] = {"subsets": list(sub_logits.values()), "pairs": pairs,
                                     "aux_weight": self.multilevel_aux_weight,
                                     "consistency_weight": self.multilevel_consistency_weight}
-        if wsi_on:
+        if wsi_on and A_out is not None:
             output['attention'] = A_out
         if aux_loss is not None:
             output['aux_loss'] = aux_loss
         if risk_std is not None:
             output['risk_std'] = risk_std
             output['posterior'] = (posterior_mu.detach(), posterior_logvar.detach())
-        return output
+        return output, fused, dropped_any
 
 
 class OXA_MISS_final_xa_graph_clinical_fusion(OXA_MISS_final):
@@ -801,7 +1099,8 @@ if __name__ == "__main__":
 
     # ogni flag di ablation, uno alla volta: forward + backward, gradiente su ogni parametro usabile
     flags = {"wsi_gated_keys": [False], "genomics_single_token": [True], "xa_shared_blocks": [True],
-             "xa_update": ["sum"], "clinical_missing": ["impute", "indicator"], "clinical_xa": [False]}
+             "xa_update": ["sum"], "clinical_missing": ["impute", "indicator"], "clinical_xa": [False],
+             "clinical_ordinal": [True]}
     for name, values in flags.items():
         for value in values:
             m = build(input_modalities=ALL, clinical_token_dropout=0.0, **{name: value}); m.train()
@@ -910,3 +1209,106 @@ if __name__ == "__main__":
         OXA_MISS_final(input_modalities=["WSI", "CNV"])
     except ValueError as e:
         print("CNV rifiutato:", e)
+
+    # ---------------------------------------------------------------- flags of 2026-10-27 (docs/ablation_plan_v2.md)
+    import copy, tempfile, types
+    from experiments.model_manager import ModelManager
+    BB = ["WSI", "Genomics", "Clinical"]
+    fails = []
+
+    def check(name, ok, info=""):
+        print(f"{'OK  ' if ok else 'FAIL'} {name} {info}")
+        if not ok:
+            fails.append(name)
+
+    def make2(wsi=True, gen=True, ct=True, mri=True, clin=True):
+        d = make(cid, wsi=wsi, gen=gen, ct=ct, mri=mri)
+        d["ct_token_meta"], d["mri_token_meta"] = torch.rand(1, 20, 4), torch.rand(1, 12, 4)
+        if not clin:
+            d["clinical_status"] = torch.tensor([False])
+        return d
+
+    def build2(mods=ALL, **kw):
+        kw.setdefault("clinical_token_dropout", 0.0)
+        return build(input_modalities=mods, **kw)
+
+    def no_grad_params(m):
+        return sorted(n for n, p in m.named_parameters() if p.grad is None and not n.startswith("clinical_tokenizer.cat_embeddings"))
+
+    # every new flag: forward + backward, every used parameter gets a gradient
+    unused_by_mbt = ("clinical_norm",)   # clinical embedding only for the probes / late_logit (not built: xa path)
+    for kw in [dict(rad_gate="tanh_zero"), dict(radiology_occ_bias=True), dict(radiology_pos_enc=True),
+               dict(radiology_ablate_features=True), dict(clinical_fusion="film"), dict(clinical_fusion="film", clinical_xa=False),
+               dict(genomics_reduce="sum"), dict(fusion_type="poe", output_dim=1, poe_subset_dropout=0.0),
+               dict(fusion_core="bottleneck"), dict(fusion_core="bottleneck", clinical_fusion="film")]:
+        m = build2(**kw); m.train()
+        out = m(make2()); (out["output"].sum() + out.get("aux_loss", 0)).backward()
+        ng = [n for n in no_grad_params(m) if not n.startswith("poe_predictors")   # detached by design
+              and not (kw.get("fusion_core") == "bottleneck" and n.startswith(unused_by_mbt))]
+        check(f"gradient {kw}", not ng, f"no gradient: {ng[:4] or 'none'}")
+
+    # zero gate: a radiology model with the backbone's weights equals the backbone, with or without radiology
+    bb = build2(BB); full = build2(ALL, rad_gate="tanh_zero", radiology_occ_bias=True, radiology_pos_enc=True)
+    missing, unexpected = full.load_state_dict(bb.state_dict(), strict=False)
+    check("backbone weights fit the radiology model", not unexpected and all(k.startswith("radiology_") for k in missing))
+    bb.eval(); full.eval()
+    with torch.no_grad():
+        for kw in (dict(), dict(ct=False), dict(ct=False, mri=False), dict(gen=False), dict(wsi=False, clin=False)):
+            d = make2(**kw)
+            diff = (full(d)["output"] - bb(d)["output"]).abs().max().item()
+            check(f"tanh_zero gate == backbone {kw}", diff < 1e-6, f"max diff {diff:.1e}")
+
+    # stage 2: ModelManager.load_backbone freezes / fine-tunes the backbone, trains the new radiology branch
+    with tempfile.TemporaryDirectory() as tmp:
+        torch.save(bb, os.path.join(tmp, "bb.pt"))
+        for mode in ("frozen", "finetune"):
+            net = build2(ALL, rad_gate="tanh_zero")
+            stub = types.SimpleNamespace(net=net, device="cpu",
+                                         config=types.SimpleNamespace(optimizer=types.SimpleNamespace(learning_rate=1e-3)))
+            stub.__getOptimizer__ = lambda: torch.optim.RAdam(stub.parameters_to_optimize, lr=1e-3, weight_decay=1e-4)
+            stub.__getScheduler__ = lambda: None
+            new = ModelManager.load_backbone(stub, os.path.join(tmp, "bb.pt"), mode=mode)
+            before = {n: p.clone() for n, p in net.named_parameters()}
+            net.train()
+            for _ in range(3):
+                stub.optimizer.zero_grad(); net(make2())["output"].sum().backward(); stub.optimizer.step()
+            changed_bb = [n for n, p in net.named_parameters() if n not in new and not torch.equal(p, before[n])]
+            check(f"stage 2 {mode}: backbone {'unchanged' if mode == 'frozen' else 'updated'}",
+                  (not changed_bb) == (mode == "frozen"), f"| alpha {net.radiology_hub.alpha.item():+.4f}")
+
+    # radiology shortcut control, occupancy bias
+    m = build2(radiology_ablate_features=True); m.eval()
+    with torch.no_grad():
+        d = make2(); o1 = m(d)["output"]; d["ct_features"] = d["ct_features"] * 10 + 3
+        check("radiology_ablate_features: content ignored", (o1 - m(d)["output"]).abs().max() < 1e-6)
+    m = build2(radiology_occ_bias=True); m.eval()
+    meta = torch.zeros(1, 20, 4); meta[0, :5, 3] = 1.0
+    _, scores = m.radiology_pool["CT"](m.radiology_proj["CT"](make2()["ct_features"]), bias=torch.log(meta[..., 3] + 1e-3))
+    check("radiology_occ_bias: attention on the organ tokens", bool((scores.softmax(-1)[0, :, :5].sum(-1) > 0.95).all()))
+
+    # whole-modality dropout: rate, never an empty patient; self-distillation only when something was dropped
+    m = build2(BB, modality_dropout=0.5); m.train()
+    states = [m._modality_dropout({"WSI": True, "Genomics": True, "Clinical": True, "CT": False, "MRI": False})[0] for _ in range(2000)]
+    rates = {k: sum(not s[k] for s in states) / 2000 for k in BB}
+    check("modality_dropout: rate, >= 1 modality kept", all(any(s.values()) for s in states) and all(0.35 < r < 0.55 for r in rates.values()), str(rates))
+    m = build2(BB, modality_dropout=0.9, self_distill_weight=1.0); m.train()
+    check("self-distillation when a modality is dropped", any("self_distill_loss" in m(make2()) for _ in range(20)))
+    m.modality_dropout = 0.0
+    check("no self-distillation without dropout", not any("self_distill_loss" in m(make2()) for _ in range(5)))
+
+    # PoE with the Cox head; MBT invariance to an absent modality; GMM prototypes as the WSI
+    m = build2(fusion_type="poe", output_dim=1, poe_subset_dropout=0.0); m.eval()
+    with torch.no_grad():
+        r = m(make2())
+    check("poe + Cox head", r["output"].shape == (1, 1) and r["risk_std"].item() > 0)
+    m = build2(fusion_core="bottleneck"); m.eval()
+    with torch.no_grad():
+        d = make2(gen=False); o1 = m(d)["output"]; d["genomics"] = {k: v * 100 for k, v in d["genomics"].items()}
+        check("bottleneck: absent genomics ignored", (o1 - m(d)["output"]).abs().max() < 1e-6)
+    for core in ("xa", "bottleneck"):
+        m = build2(wsi_encoder="gmm", gmm_components=32, fusion_core=core); m.train()
+        d = make2(); d["patch_features"] = torch.cat([torch.rand(1, 32, 1), torch.randn(1, 32, 1024), torch.rand(1, 32, 1024)], -1)
+        d["mask"] = torch.zeros(1, 32)
+        m(d)["output"].sum().backward()
+        check(f"wsi_encoder gmm ({core})", m.gmm_position.grad is not None and m.inner_proj.in_features == 1 + 2 * 1024)
+    print("new flags:", "all OK" if not fails else f"FAILED {fails}")

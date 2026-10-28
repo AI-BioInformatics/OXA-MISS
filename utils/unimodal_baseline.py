@@ -42,6 +42,7 @@ sys.path.insert(0, os.path.join(REPO, "utils"))
 sys.path.insert(0, os.path.join(REPO, "grid_search"))
 from dataloader.build import build_dataset, fold_patients  # noqa: E402
 from dataloader.kfold import kfold_split_files  # noqa: E402
+from dataloader.dataloader_multidataset import load_wsi_bag  # noqa: E402
 from clinical_baseline import design_matrix as clinical_design  # noqa: E402
 from experiments.utils import safe_c_index  # noqa: E402
 
@@ -65,7 +66,7 @@ def wsi_means(dataset, cache_dir):
         for pid in patients:
             total, count = 0.0, 0
             for slide in dataset.slides_on_disk[pid]:
-                bag = torch.load(dataset._slide_path(params.pt_files_path, slide), weights_only=True, map_location="cpu").float()
+                bag = load_wsi_bag(dataset._slide_path(params.pt_files_path, slide)).float()   # .pt or .h5
                 total, count = total + bag.sum(dim=0), count + bag.shape[0]
             ids.append(pid)
             means.append((total / count).numpy())

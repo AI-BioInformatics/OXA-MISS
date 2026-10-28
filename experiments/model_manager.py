@@ -6,14 +6,15 @@ import torch.optim as optim
 import torch.nn.functional as F
 import wandb
 import logging, datetime, sys, time
-from .loss.loss_func import NLLSurvLoss
+from .loss.loss_func import NLLSurvLoss, CoxPHLoss, risk_from_logits
 import pandas as pd
 from lifelines import KaplanMeierFitter
 from lifelines.statistics import logrank_test
 from sklearn.metrics import roc_auc_score, f1_score, recall_score, balanced_accuracy_score
 import matplotlib.pyplot as plt
 import copy
-from .utils import accuracy_confusionMatrix_plot, move_to_device, safe_c_index, km_risk_groups_plot, extended_survival_metrics
+from .utils import accuracy_confusionMatrix_plot, move_to_device, safe_c_index, km_risk_groups_plot, extended_survival_metrics, breslow_baseline, \
+    stratified_c_index, cancer_type_of
 import os
 DEBUG_BATCHES = 8
 
@@ -62,7 +63,12 @@ class ModelManager():
         
     def __getLossFunction__(self):
         if self.config.loss.name == "NLLSurvLoss":
-            return NLLSurvLoss(**self.config.loss.kwargs)
+            # the Cox-only keys of the base config (risk_set, risk_set_size) are dropped: a version can switch
+            # the loss to NLL without rewriting loss.kwargs (ablation loss_nll)
+            kwargs = {k: v for k, v in self.config.loss.kwargs.items() if k not in ("risk_set", "risk_set_size")}
+            return NLLSurvLoss(**kwargs)
+        elif self.config.loss.name == "CoxPHLoss":
+            return CoxPHLoss(**self.config.loss.kwargs)
         elif self.config.loss.name == "MSELoss":
             return nn.MSELoss(**self.config.loss.kwargs)
         elif self.config.loss.name == "CrossEntropyLoss":
@@ -71,6 +77,39 @@ class ModelManager():
             return nn.CrossEntropyLoss(**self.config.loss.kwargs)
         else:
             raise Exception(f"{self.config.loss.name} is not supported!")
+
+    def load_backbone(self, path, mode="frozen", lr_scale=0.1):
+        """Two-stage training (trainer.stage2): loads the weights of a stage-1 checkpoint (a model without CT / MRI,
+        same architecture otherwise) into this model; the parameters the checkpoint lacks (the radiology branch)
+        keep their initialization. frozen: only the new parameters are trained; finetune: the backbone too, with
+        learning rate x lr_scale. Rebuilds optimizer and scheduler. Returns the names of the new parameters."""
+        if mode not in ("frozen", "finetune"):
+            raise ValueError(f"trainer.stage2.backbone {mode}: frozen | finetune")
+        backbone = torch.load(path, weights_only=False, map_location=self.device)
+        state = backbone.state_dict() if hasattr(backbone, "state_dict") else backbone
+        missing, unexpected = self.net.load_state_dict(state, strict=False)
+        if unexpected:
+            raise ValueError(f"stage 2: {path} has parameters this model lacks: {unexpected[:5]}")
+        not_radiology = [k for k in missing if not k.startswith("radiology_")]
+        if not_radiology:
+            raise ValueError(f"stage 2: {path} lacks non-radiology parameters {not_radiology[:5]}: not the same backbone")
+        new = set(missing)
+        new_params = [p for n, p in self.net.named_parameters() if n in new]
+        old_params = [p for n, p in self.net.named_parameters() if n not in new]
+        if mode == "frozen":
+            for p in old_params:
+                p.requires_grad_(False)
+            self.parameters_to_optimize = new_params
+        else:
+            self.parameters_to_optimize = [{"params": new_params},
+                                           {"params": old_params, "lr": self.config.optimizer.learning_rate * lr_scale}]
+        self.optimizer = self.__getOptimizer__()
+        self.scheduler = self.__getScheduler__()
+        n_new = sum(p.numel() for p in new_params)
+        n_old = sum(p.numel() for p in old_params)
+        logging.info(f"stage 2 ({mode}): backbone {path} loaded, {n_new} new radiology parameters trained, "
+                     f"{n_old} backbone parameters {'frozen' if mode == 'frozen' else f'fine-tuned at lr x {lr_scale}'}")
+        return sorted(new)
 
     def __getOptimizer__(self):
         if self.config.optimizer.name == "AdoptAtan2":
@@ -173,28 +212,139 @@ class ModelManager():
         S_prev = torch.cat([torch.ones_like(S[:, :1]), S[:, :-1]], dim=-1)
         return torch.cat([S_prev * h, S[:, -1:]], dim=-1)
 
-    def _multilevel_loss(self, multilevel, labels, censorships, task_type):
+    def _multilevel_loss(self, multilevel, labels, censorships, task_type, survival=True):
         """Survival loss on every smaller radiology configuration of the patient (aux_weight) and
         KL(parent detached || child) between each configuration and its parents with one exam less
-        (consistency_weight): every configuration is predictive, a richer one refines the poorer one."""
+        (consistency_weight): every configuration is predictive, a richer one refines the poorer one.
+        survival=False: only the consistency term (CoxPHLoss: the survival term needs the risk set, _cox_set_loss)."""
         loss = 0.0
         subsets = multilevel["subsets"]
-        if subsets:
+        if subsets and survival:
             loss = loss + multilevel["aux_weight"] * torch.stack(
                 [self._loss(l, labels, censorships, task_type) for l in subsets]).mean()
         if multilevel["pairs"]:
             kl = []
             for child, parent in multilevel["pairs"]:
+                if child.shape[-1] == 1:
+                    # Cox head: no event distribution; squared distance of the log hazard ratios
+                    kl.append(((child - parent.detach()) ** 2).sum(dim=-1).mean())
+                    continue
                 p_parent = self._event_distribution(parent.detach())
                 p_child = self._event_distribution(child)
                 kl.append((p_parent * (p_parent.log() - p_child.log())).sum(dim=-1).mean())
             loss = loss + multilevel["consistency_weight"] * torch.stack(kl).mean()
         return loss
 
-    def _loss(self, outputs, labels, censorships, task_type):
-        """Task loss of one batch (without the model specific terms added in training)."""
+    def _optimizer_step(self):
+        if self.clip_grad_norm_max_norm is not None:
+            torch.nn.utils.clip_grad_norm_(self.net.parameters(), max_norm=self.clip_grad_norm_max_norm)
+        self.optimizer.step()
+        self.optimizer.zero_grad()
+        if self.config.scheduler.batch_step:
+            self.scheduler.step()
+
+    def _cox_entry(self, step_result, batch, labels, censorships, task_type, device):
+        """One training patient of a CoxPHLoss risk set: its risk (with graph), follow-up, censorship, the mean
+        risk of its smaller radiology configurations (multi-level loss) and its per-patient terms."""
+        extra = 0.0
+        if "partial_loss" in step_result:
+            extra = extra + step_result["partial_loss"]
+        if "aux_loss" in step_result:
+            extra = extra + step_result["aux_loss"]
+        sub_risk, aux_weight = None, 0.0
+        if "multilevel" in step_result:
+            multilevel = step_result["multilevel"]
+            extra = extra + self._multilevel_loss(multilevel, labels, censorships, task_type, survival=False)
+            if multilevel["subsets"]:
+                sub_risk = torch.stack([risk_from_logits(l) for l in multilevel["subsets"]]).mean(dim=0)
+                aux_weight = multilevel["aux_weight"]
+        return {"risk": risk_from_logits(step_result["outputs"]), "sub_risk": sub_risk, "aux_weight": aux_weight,
+                "time": batch["original_event_time"].to(device).view(-1), "censorship": censorships.view(-1),
+                "extra": extra}
+
+    def _cox_set_loss(self, risk_set):
+        """Partial likelihood of the set + the multi-level survival term (each patient's risk replaced by the
+        mean risk of its smaller radiology configurations; a patient without radiology keeps its own, which is
+        already its core-only configuration) + the mean of the per-patient terms."""
+        risk = torch.cat([e["risk"] for e in risk_set])
+        time = torch.cat([e["time"] for e in risk_set])
+        censorship = torch.cat([e["censorship"] for e in risk_set])
+        loss = self.loss_function.from_risk(risk, time, censorship)
+        if any(e["sub_risk"] is not None for e in risk_set):
+            sub_risk = torch.cat([e["risk"] if e["sub_risk"] is None else e["sub_risk"] for e in risk_set])
+            aux_weight = max(e["aux_weight"] for e in risk_set)
+            loss = loss + aux_weight * self.loss_function.from_risk(sub_risk, time, censorship)
+        return loss + sum(e["extra"] for e in risk_set) / len(risk_set)
+
+    @staticmethod
+    def _each_patient_once(loader):
+        """The training loader for a pass over every training patient exactly once (Cox risk bank, Breslow):
+        with a weighted sampler (data_loader.sampler cancer_balanced / cancer_sqrt, draws with replacement) a
+        sequential loader over the same patients, otherwise the loader itself."""
+        if not isinstance(loader.sampler, torch.utils.data.WeightedRandomSampler):
+            return loader
+        return torch.utils.data.DataLoader(loader.dataset, batch_size=1, shuffle=False, pin_memory=True,
+                                           num_workers=loader.num_workers,
+                                           prefetch_factor=loader.prefetch_factor if loader.num_workers > 0 else None)
+
+    def _backward(self, loss):
+        """Backward of the training loss, skipped when the loss has no graph: stage 2 with a frozen backbone and a
+        patient whose only exam was dropped by radiology_dropout -> the output is the frozen backbone's."""
+        if loss.requires_grad:
+            loss.backward()
+        else:
+            self.n_skipped_backward = getattr(self, "n_skipped_backward", 0) + 1
+
+    def _init_cox_bank(self, train_dataloader, task_type, device):
+        """Risk bank of CoxPHLoss(risk_set="cohort"): the latest risk (no graph), follow-up and censorship of every
+        training patient, filled by a no-grad pass of the initial model and updated after each forward."""
+        train_dataloader.dataset.dataset.set_sample(self.config.data_loader.test_sample)
+        self.net.eval()   # back to train mode at the start of the first epoch
+        log_dict, _ = self._run_eval(self._each_patient_once(train_dataloader), task_type, device)
+        ids = list(log_dict["patient_ids"])
+        if len(set(ids)) != len(ids):
+            raise ValueError("CoxPHLoss cohort: a training patient appears twice in the training loader")
+        as_tensor = lambda key: torch.tensor(log_dict[key], dtype=torch.float32, device=device)
+        self.cox_bank = {"index": {pid: i for i, pid in enumerate(ids)}, "risk": as_tensor("all_risk_scores"),
+                         "time": as_tensor("all_original_event_times"), "censorship": as_tensor("all_censorships")}
+        logging.info(f"CoxPHLoss cohort: risk set of {len(ids)} training patients, "
+                     f"{int((self.cox_bank['censorship'] == 0).sum())} events")
+
+    def _cox_cohort_loss(self, entry, patient_ids):
+        """Term of one training patient (or batch) of CoxPHLoss(risk_set="cohort"): N x the partial likelihood of
+        the whole training set (mean over its events) with these patients' risks live and the others' from the
+        bank, so that the mean over the patients of a step estimates the gradient of the cohort likelihood (exact
+        when the bank is current); + the multi-level survival term (risk of the smaller radiology configurations
+        in place of the patient's) and the per-patient terms. Updates the bank.
+        Returns (loss with graph, cohort partial likelihood for the log)."""
+        bank = self.cox_bank
+        index = torch.tensor([bank["index"][pid] for pid in patient_ids], device=bank["risk"].device)
+        n = len(bank["risk"])
+        cohort = lambda live: self.loss_function.from_risk(bank["risk"].detach().index_put((index,), live),
+                                                           bank["time"], bank["censorship"])
+        cohort_loss = cohort(entry["risk"])
+        loss = n * cohort_loss
+        if entry["sub_risk"] is not None:
+            loss = loss + entry["aux_weight"] * n * cohort(entry["sub_risk"])
+        bank["risk"][index] = entry["risk"].detach().to(bank["risk"].dtype)
+        return loss + entry["extra"], cohort_loss.item()
+
+    def _fit_breslow(self, model, train_dataloader, task_type, device):
+        """Breslow baseline hazard of a Cox-head model (output_dim 1) on the training patients, stored in the
+        model (model.breslow, pickled with the checkpoint): the survival curves of the test metrics (IBS, D-cal)."""
+        train_dataloader.dataset.dataset.set_sample(self.config.data_loader.test_sample)
+        model.to(device)
+        model.eval()
+        log_dict, _ = self._run_eval(self._each_patient_once(train_dataloader), task_type, device, model=model)
+        model.breslow = breslow_baseline(log_dict["all_risk_scores"], log_dict["all_original_event_times"],
+                                         1 - np.asarray(log_dict["all_censorships"]))
+        model.to("cpu")
+
+    def _loss(self, outputs, labels, censorships, task_type, times=None):
+        """Task loss of one batch (without the model specific terms added in training). times: follow-up in
+        days (used by CoxPHLoss; NLLSurvLoss uses the bins in labels)."""
         if task_type == "Survival":
-            return self.loss_function(outputs, labels, None, censorships)
+            return self.loss_function(outputs, labels, times, censorships)
         if task_type == "Treatment_Response":
             return self.loss_function(outputs, labels.squeeze(1))
         raise Exception(f"{task_type} is not supported!")
@@ -203,23 +353,44 @@ class ModelManager():
         """No-grad pass over a loader (validation / test, optionally a missing modality scenario):
         returns (log_dict with the predictions, loss averaged over the batches weighted by their size).
         on_batch(batch, step_result) is called after each batch (e.g. to save attentions)."""
-        log_dict = self.initialize_metrics_dict(task_type)
-        losses, weights = [], []
+        return self._run_eval_multi(loader, task_type, device, [(None, model, scenario, on_batch)], debug=debug)[None]
+
+    def _run_eval_multi(self, loader, task_type, device, runs, debug=False):
+        """ONE no-grad pass over a loader for several (key, model, scenario, on_batch) runs: every batch is read
+        and moved to the device once, then fed to each run (checkpoint x missing modality scenario). Returns
+        {key: (log_dict, loss)}, each as _run_eval would give for that model and scenario alone."""
+        log_dicts = {key: self.initialize_metrics_dict(task_type) for key, _, _, _ in runs}
+        losses = {key: [] for key, _, _, _ in runs}
+        weights = []
         with torch.inference_mode():
             for batch_numb, (idx, batch) in enumerate(self._batches(loader)):
                 if debug and batch_numb == DEBUG_BATCHES:
                     break
-                step_result = self.step(batch, log_dict, task_type, device, model, scenario, is_eval=True)
-                log_dict = step_result['log_dict']
-                loss = self._loss(step_result['outputs'], step_result['labels'], step_result['censorships'], task_type)
-                if self.config.data_loader.batch_size <= self.config.data_loader.real_batch_size:
-                    losses.append(loss.item())
-                else:
-                    losses.append(loss.detach().mean().item())
+                batch_data_device = move_to_device(batch['input'], device)
+                for key, model, scenario, on_batch in runs:
+                    step_result = self.step(batch, log_dicts[key], task_type, device, model, scenario, is_eval=True,
+                                            batch_data_device=batch_data_device)
+                    log_dicts[key] = step_result['log_dict']
+                    loss = self._loss(step_result['outputs'], step_result['labels'], step_result['censorships'], task_type)
+                    if self.config.data_loader.batch_size <= self.config.data_loader.real_batch_size:
+                        losses[key].append(loss.item())
+                    else:
+                        losses[key].append(loss.detach().mean().item())
+                    if on_batch is not None:
+                        on_batch(batch, step_result)
                 weights.append(batch["label"].size(dim=0))
-                if on_batch is not None:
-                    on_batch(batch, step_result)
-        return log_dict, np.average(np.array(losses), weights=weights)
+        results = {}
+        for key, _, _, _ in runs:
+            log_dict = log_dicts[key]
+            if isinstance(self.loss_function, CoxPHLoss) and task_type == "Survival":
+                # partial likelihood of the whole set (per patient it is always 0)
+                loss = self.loss_function(torch.tensor(log_dict["survival_predictions"]), None,
+                                          torch.tensor(log_dict["all_original_event_times"]),
+                                          torch.tensor(log_dict["all_censorships"]))
+                results[key] = (log_dict, loss.item())
+            else:
+                results[key] = (log_dict, np.average(np.array(losses[key]), weights=weights))
+        return results
 
     @staticmethod
     def _fold_checkpoint(path, kfold):
@@ -257,6 +428,9 @@ class ModelManager():
             - risk : torch.Tensor 
         
         """
+        if h.shape[1] == 1:   # Cox head (output_dim 1): the output is the log hazard ratio, no curve here
+            risk = h[:, 0].detach().cpu().numpy()
+            return risk, None
         hazards = torch.sigmoid(h)
         survival = torch.cumprod(1 - hazards, dim=1)
         risk = -torch.sum(survival, dim=1).detach().cpu().numpy()
@@ -298,8 +472,14 @@ class ModelManager():
             outputs = log_df["survival_predictions"].values
             # c-index on the follow-up time in days; the loss on the discretized time bins (all_event_times)
             c_index = self._safe_c_index(all_censorships, log_df["all_original_event_times"].values, all_risk_scores)
-            loss = self.loss_function(torch.tensor(outputs.tolist()), torch.tensor(all_event_times).unsqueeze(-1), None, torch.tensor(all_censorships).unsqueeze(-1))
+            loss = self.loss_function(torch.tensor(outputs.tolist()), torch.tensor(all_event_times).unsqueeze(-1),
+                                      torch.tensor(log_df["all_original_event_times"].values).unsqueeze(-1),
+                                      torch.tensor(all_censorships).unsqueeze(-1))
             metrics_dict = {"c-index": c_index, "Loss": loss}
+            if "dataset_name" in log_df:   # pairs only within the same (harmonized) cancer type
+                metrics_dict["c-index_stratified"] = stratified_c_index(
+                    all_censorships, log_df["all_original_event_times"].values, all_risk_scores,
+                    log_df["dataset_name"].map(cancer_type_of).values)
         elif task_type == "Treatment_Response":
             all_labels = log_df["all_labels"].values
             all_predictions = log_df["treatment_response_predictions"].values
@@ -346,7 +526,8 @@ class ModelManager():
             dataset_df = log_df[log_df["dataset_name"]==dataset]
             curr_metrics_dict = self.compute_metrics(dataset_df, task_type)
             for key, value in curr_metrics_dict.items():
-                metrics_dict[f"{dataset}_{key}"] = value
+                if key != "c-index_stratified":   # one cancer type: same as its c-index
+                    metrics_dict[f"{dataset}_{key}"] = value
                         
         metrics_dict = {k: v.item() if isinstance(v, torch.Tensor) else v for k, v in metrics_dict.items()}
         return metrics_dict   
@@ -397,6 +578,15 @@ class ModelManager():
     STATUS_KEYS = {"WSI": "WSI_status", "Genomics": "genomics_status", "CNV": "cnv_status",
                    "CT": "ct_status", "MRI": "mri_status", "Clinical": "clinical_status"}
 
+    def _avail_patterns(self, data, model):
+        """'+'-joined available modalities of each patient of the batch, among the model's input modalities
+        ('none' if no modality)."""
+        modalities = getattr(model, "input_modalities", None) or self.config.model.kwargs.get("input_modalities", [])
+        keys = [(m, self.STATUS_KEYS[m]) for m in modalities if m in self.STATUS_KEYS and self.STATUS_KEYS[m] in data]
+        n = len(data[keys[0][1]].view(-1)) if keys else 0
+        status = {m: data[k].view(-1).bool().tolist() for m, k in keys}
+        return ["+".join(m for m, _ in keys if status[m][i]) or "none" for i in range(n)]
+
     def adjust_status(self, data, scenario, modalities=None):
         """Statuses of a missing modality test scenario: computed by the dataset as (patient has the modality)
         and (the scenario keeps it), for every modality; a modality outside `modalities` (those of the
@@ -408,15 +598,18 @@ class ModelManager():
                 data[status_key] = scenario_status[f"{scenario}/{modality}"].reshape(data[status_key].shape)
         return data
 
-    def step(self, batch, log_dict, task_type="Survival", device="cuda", model=None, eval_missing_modality_scenario=None, is_eval=False):
-        batch_data = batch['input']
+    def step(self, batch, log_dict, task_type="Survival", device="cuda", model=None, eval_missing_modality_scenario=None, is_eval=False,
+             batch_data_device=None):
+        # batch_data_device: batch['input'] already on the device (one copy shared by several evaluations of the
+        # same batch, _run_eval_multi). A scenario only replaces status entries (adjust_status assigns new
+        # tensors): a shallow copy of the top-level dict leaves the shared input untouched.
+        batch_data = batch_data_device if batch_data_device is not None else move_to_device(batch['input'], device)
+        batch_data = dict(batch_data)
         if eval_missing_modality_scenario:
             is_eval = True
-            batch_data = copy.deepcopy(batch['input'])
             batch_data = self.adjust_status(batch_data, eval_missing_modality_scenario, self.eval_modalities)
             
         labels = batch['label'] #  check this casting        
-        batch_data = move_to_device(batch_data, device)
         labels = labels.to(device)   
                  
         if len(labels.shape) == 1:
@@ -458,6 +651,9 @@ class ModelManager():
                     
         log_dict["patient_ids"]+=(batch['patient_id'])
         log_dict["dataset_name"]+=(batch['dataset_name'])
+        # modalities the model actually received (after a test scenario's masking): per-pattern tables and
+        # the has-radiology subset (utils/patient_level_analysis.py)
+        log_dict.setdefault("avail_pattern", []).extend(self._avail_patterns(batch_data, model))
 
         output = {'outputs': outputs, 'labels': labels,                   
                   'censorships': censorships, 'log_dict': log_dict}
@@ -511,6 +707,8 @@ class ModelManager():
 
         if kfold != "":
             logging.info(f'Starting training for {kfold}')
+        if isinstance(self.loss_function, CoxPHLoss) and self.loss_function.risk_set == "cohort" and task_type == "Survival":
+            self._init_cox_bank(train_dataloader, task_type, device)
         for epoch in range(self.config.trainer.epochs):
             if STOP:
                 logging.info(f'STOPPED at epoch {epoch}')
@@ -529,6 +727,8 @@ class ModelManager():
                     logging.info(f'Robust training is enabled for training')
                     train_dataloader.dataset.dataset.set_robust_training_on()
             
+            cox = isinstance(self.loss_function, CoxPHLoss) and task_type == "Survival"
+            risk_set = []
             for idx, batch in self._batches(train_dataloader):
                 if debug and batch_numb == DEBUG_BATCHES:
                     print("DEBUG_BATCHES value reached")
@@ -543,6 +743,31 @@ class ModelManager():
                 censorships = step_result['censorships'] 
                 log_dict = step_result['log_dict']
 
+                if cox and self.loss_function.risk_set == "cohort":
+                    # CoxPHLoss over the whole training set: this patient's risk live, the others from the bank;
+                    # accumulated and stepped every real_batch_size patients, as NLLSurvLoss
+                    entry = self._cox_entry(step_result, batch, labels, censorships, task_type, device)
+                    loss, cohort_loss = self._cox_cohort_loss(entry, batch["patient_id"])
+                    tloss.append(cohort_loss)
+                    self._backward(loss / self.NUM_ACCUMULATION_STEPS)
+                    if (idx + 1) % self.NUM_ACCUMULATION_STEPS == 0:
+                        self._optimizer_step()
+                    batch_numb += 1
+                    continue
+
+                if cox:
+                    # CoxPHLoss: the partial likelihood needs a risk set; keep the graphs of risk_set_size
+                    # patients, then one backward and one optimizer step (the last set of the epoch may be smaller)
+                    risk_set.append(self._cox_entry(step_result, batch, labels, censorships, task_type, device))
+                    if len(risk_set) == self.loss_function.risk_set_size or idx + 1 == len(train_dataloader) \
+                            or (debug and batch_numb + 1 == DEBUG_BATCHES):
+                        loss = self._cox_set_loss(risk_set)
+                        tloss.append(loss.item())
+                        self._backward(loss)
+                        self._optimizer_step()
+                        risk_set = []
+                    batch_numb += 1
+                    continue
 
                 if self.config.data_loader.batch_size <= self.config.data_loader.real_batch_size:
                     loss = self._loss(outputs, labels, censorships, task_type)
@@ -559,15 +784,9 @@ class ModelManager():
 
                     loss = loss / self.NUM_ACCUMULATION_STEPS
                     tloss.append(loss.item()*self.NUM_ACCUMULATION_STEPS)
-                    loss.backward()
+                    self._backward(loss)
                     if ((idx + 1) % self.NUM_ACCUMULATION_STEPS == 0):
-                        if self.clip_grad_norm_max_norm is not None:
-                            torch.nn.utils.clip_grad_norm_(self.net.parameters(), 
-                                                           max_norm=self.clip_grad_norm_max_norm)
-                        self.optimizer.step()    
-                        self.optimizer.zero_grad()
-                        if self.config.scheduler.batch_step:                   
-                            self.scheduler.step()
+                        self._optimizer_step()
                 else:
                     raise Exception(f"Batch size > real batch size is not supported!")               
                 batch_numb += 1
@@ -680,6 +899,17 @@ class ModelManager():
                 else:
                     patience_counter += 1
 
+        if task_type == "Survival" and getattr(self.net, "output_layer", None) is not None \
+                and self.net.output_layer.out_features == 1:
+            # Cox head: Breslow baseline hazard of each checkpoint (and of self.net, evaluated with best=False)
+            # stage 2 (two-stage training) trains on the radiology patients only: the baseline hazard is fitted on
+            # all the training patients of the fold (breslow_dataloader, set by main.py), as for any other run
+            breslow_loader = getattr(self, "breslow_dataloader", None) or train_dataloader
+            for model in (model_last_epoch, model_lowest_loss, model_highest_metric):
+                if model is not None:
+                    self._fit_breslow(model, breslow_loader, task_type, device)
+            self.net.breslow = model_last_epoch.breslow if model_last_epoch is not None else None
+
         if self.config.model.save_checkpoints:
             torch.save(model_last_epoch, checkpoint_last_epoch)
         
@@ -692,6 +922,86 @@ class ModelManager():
                         root, ext = os.path.splitext(checkpoint)
                         checkpoint = f"{root}{df_fold_suffix}{ext}"
                     torch.save(model, checkpoint)
+
+    def _eval_checkpoints(self, best, kfold, checkpoint_last_epoch, checkpoint_model_lowest_loss,
+                          checkpoint_model_highest_metric):
+        """(models, summary paths) evaluated by evaluate: lowest-loss / highest-metric checkpoints when they
+        exist (training had a validation set), always the last epoch."""
+        models, summary_paths = [], []
+        if best:
+            if kfold != "":
+                checkpoint_last_epoch = self._fold_checkpoint(checkpoint_last_epoch, kfold)
+                checkpoint_model_lowest_loss = self._fold_checkpoint(checkpoint_model_lowest_loss, kfold)
+                checkpoint_model_highest_metric = self._fold_checkpoint(checkpoint_model_highest_metric, kfold)
+            if os.path.exists(checkpoint_model_lowest_loss):
+                models.append(torch.load(checkpoint_model_lowest_loss, weights_only=False))
+                summary_paths.append('Lowest_Validation_Loss_Model/Test')
+            if os.path.exists(checkpoint_model_highest_metric):
+                models.append(torch.load(checkpoint_model_highest_metric, weights_only=False))
+                summary_paths.append('Highest_Validation_Metric_Model/Test')
+            models.append(torch.load(checkpoint_last_epoch, weights_only=False))
+        else:
+            models.append(self.net)
+        summary_paths.append('Last_Epoch_Model/Test')
+        return models, summary_paths
+
+    def evaluate_all(self, test_dataloader, scenarios=(None,), task_type="Survival",
+                     checkpoint_last_epoch='{path}/model_last_epoch.pt',
+                     checkpoint_model_lowest_loss='{path}/model_lowest_loss.pt',
+                     checkpoint_model_highest_metric='{path}/model_highest_metric.pt',
+                     device="cuda", best=False, path="", kfold="", log_aggregated=False, log_on_telegram=True,
+                     Save_XA_attention_files=False, print_demo_results=False, repo_path=None, test_modalities=None,
+                     external=False):
+        """evaluate() for every missing modality scenario (None = the base test) and every checkpoint, with ONE
+        pass over test_dataloader: each batch is read once and fed to all (checkpoint x scenario) runs; then the
+        results of each scenario are processed, saved and aggregated exactly as by evaluate().
+        print_demo_results applies to the last scenario."""
+        scenarios = list(scenarios) or [None]
+        self.eval_modalities = list(test_modalities) if test_modalities is not None else None
+        models, summary_paths = self._eval_checkpoints(best, kfold, checkpoint_last_epoch, checkpoint_model_lowest_loss,
+                                                       checkpoint_model_highest_metric)
+        test_tag = self.test_modalities_tag(test_modalities)
+        runs = []
+        for model, summary_path in zip(models, summary_paths):
+            model = model.to(device)
+            model.eval()
+            if hasattr(model, "return_xa_attentions") or model.__class__.__name__ == "OXA_MISS":
+                model.return_xa_attentions = Save_XA_attention_files
+            root = summary_path.split("/")[0]
+            for scenario in scenarios:
+                save_attentions = None
+                if Save_XA_attention_files:
+                    tag = '/'.join([p for p in ("external" if external else None, test_tag, scenario) if p]) or "base"
+                    suffix = "" if tag == "base" else "_" + tag.replace("/", "_")
+                    attention_tag = self.MODEL_VERSION_TAGS.get(root, root) + suffix
+                    save_attentions = (lambda batch, step_result, t=attention_tag: self.save_XA_attentions(
+                        batch, step_result, path, partition="test", epoch=t))
+                runs.append(((root, scenario), model, scenario, save_attentions))
+        logging.info(f"one pass over the test data for {len(models)} checkpoints x {len(scenarios)} scenarios")
+        results = self._run_eval_multi(test_dataloader, task_type, device, runs)
+        if os.environ.get("OXA_EVAL_CHECK") == "1":
+            # verification of the single pass (off by default): each run evaluated alone, as before the refactor
+            for (root, scenario), model, _, _ in runs:
+                alone, _ = self._run_eval(test_dataloader, task_type, device, model=model, scenario=scenario)
+                shared = results[(root, scenario)][0]
+                if list(alone["patient_ids"]) != list(shared["patient_ids"]):
+                    raise AssertionError(f"OXA_EVAL_CHECK: {root} / {scenario}: patients differ")
+                for key in ("all_risk_scores", "survival_predictions"):
+                    a_, b_ = np.asarray(alone[key], dtype=float), np.asarray(shared[key], dtype=float)
+                    if a_.shape != b_.shape or not np.allclose(a_, b_, atol=1e-6):
+                        raise AssertionError(f"OXA_EVAL_CHECK: {root} / {scenario} / {key}: max diff "
+                                             f"{np.max(np.abs(a_ - b_)) if a_.shape == b_.shape else a_.shape}")
+            logging.info(f"OXA_EVAL_CHECK passed: {len(runs)} runs identical to separate passes")
+        for i, scenario in enumerate(scenarios):
+            self.evaluate(test_dataloader, task_type=task_type, checkpoint_last_epoch=checkpoint_last_epoch,
+                          checkpoint_model_lowest_loss=checkpoint_model_lowest_loss,
+                          checkpoint_model_highest_metric=checkpoint_model_highest_metric, device=device, best=best,
+                          path=path, kfold=kfold, log_aggregated=log_aggregated, log_on_telegram=log_on_telegram,
+                          Save_XA_attention_files=False, eval_missing_modality_scenario=scenario,
+                          print_demo_results=print_demo_results and i == len(scenarios) - 1, repo_path=repo_path,
+                          test_modalities=test_modalities, external=external,
+                          precomputed={root: results[(root, scenario)] for root in {s.split("/")[0] for s in summary_paths}},
+                          preloaded_models=(models, summary_paths))
 
     def evaluate(self, test_dataloader, 
                 task_type="Survival", 
@@ -709,10 +1019,16 @@ class ModelManager():
                 print_demo_results=False,
                 is_demo_test=False,
                 repo_path=None,
-                test_modalities=None):
+                test_modalities=None,
+                external=False,
+                precomputed=None,
+                preloaded_models=None):
         """test_modalities: the modalities of test_dataloader when they differ from the training ones: the
         results are kept apart, under the scenario test_<modalities> (combined with a missing modality
-        scenario, if any)."""
+        scenario, if any). external: test_dataloader holds the external test datasets (external_test_configs):
+        results under the scenario external[/...]. precomputed / preloaded_models: set by evaluate_all (one
+        pass over the data for every checkpoint and scenario): {checkpoint tag: (log_dict, loss)} and the
+        (models, summary_paths) of the checkpoints, instead of a pass here."""
         test_tag = self.test_modalities_tag(test_modalities)
         self.eval_modalities = list(test_modalities) if test_modalities is not None else None
         if not eval_missing_modality_scenario:
@@ -727,7 +1043,9 @@ class ModelManager():
         models = []
         summary_paths = []
         
-        if best:
+        if preloaded_models is not None:
+            models, summary_paths = list(preloaded_models[0]), list(preloaded_models[1])
+        elif best:
             if kfold != "":
                 checkpoint_last_epoch = self._fold_checkpoint(checkpoint_last_epoch, kfold)
                 checkpoint_model_lowest_loss = self._fold_checkpoint(checkpoint_model_lowest_loss, kfold)
@@ -747,9 +1065,13 @@ class ModelManager():
             last_model = self.net
             logging.info("\n Evaluate last model")
 
-        models.append(last_model)
-        summary_paths.append('Last_Epoch_Model/Test')
+        if preloaded_models is None:
+            models.append(last_model)
+            summary_paths.append('Last_Epoch_Model/Test')
 
+        if external:
+            for i in range(len(summary_paths)):
+                summary_paths[i] += "/External"
         if test_tag:
             for i in range(len(summary_paths)):
                 summary_paths[i] += f"/Test_modalities/{test_tag}"
@@ -757,7 +1079,7 @@ class ModelManager():
             for i, (model, summary_path) in enumerate(zip(models, summary_paths)):
                 summary_paths[i] += f"/Missing_modalities_scenarios/{eval_missing_modality_scenario}"        
 
-        scenario = '/'.join([p for p in (test_tag, eval_missing_modality_scenario) if p]) or "base"
+        scenario = '/'.join([p for p in ("external" if external else None, test_tag, eval_missing_modality_scenario) if p]) or "base"
         scenario_suffix = "" if scenario == "base" else "_" + scenario.replace("/", "_")
         for model, summary_path in zip(models, summary_paths):
             model = model.to(device)
@@ -768,8 +1090,11 @@ class ModelManager():
             attention_tag = self.MODEL_VERSION_TAGS.get(summary_path.split("/")[0], summary_path.split("/")[0]) + scenario_suffix
             save_attentions = (lambda batch, step_result, tag=attention_tag: self.save_XA_attentions(
                 batch, step_result, path, partition="test", epoch=tag)) if Save_XA_attention_files else None
-            log_dict, tloss = self._run_eval(test_dataloader, task_type, device, model=model,
-                                             scenario=eval_missing_modality_scenario, on_batch=save_attentions)
+            if precomputed is not None:
+                log_dict, tloss = precomputed[summary_path.split("/")[0]]
+            else:
+                log_dict, tloss = self._run_eval(test_dataloader, task_type, device, model=model,
+                                                 scenario=eval_missing_modality_scenario, on_batch=save_attentions)
             test_df = pd.DataFrame(log_dict)
             test_df_path = f"{path}/test_df_{df_fold_suffix}_{summary_path.split('/')[0]}{scenario_suffix}.csv"
             test_df.to_csv(test_df_path, index=False)
@@ -781,12 +1106,17 @@ class ModelManager():
                 test_metrics_dict["n_events"] = int((test_df["all_censorships"] == 0).sum())
                 # Uno c-index, integrated Brier score, D-calibration (survival curves on the dataset's time bins)
                 edges = self.config.data_loader.get("survival_bins")
-                if edges is not None:
+                predictions = np.stack(test_df["survival_predictions"].values)
+                # Cox head (output_dim 1): curves from the Breslow baseline hazard of the training set
+                breslow = getattr(model, "breslow", None) if predictions.shape[1] == 1 else None
+                if predictions.shape[1] == 1 and breslow is None:
+                    logging.warning("Cox head without a Breslow baseline hazard: no Uno c-index / IBS / D-cal")
+                elif edges is not None:
                     reference = getattr(self, "reference_survival", None)
                     test_metrics_dict.update(extended_survival_metrics(
-                        np.stack(test_df["survival_predictions"].values), test_df["all_censorships"].values,
+                        predictions, test_df["all_censorships"].values,
                         test_df["all_original_event_times"].values, edges,
-                        *(reference if reference is not None else (None, None))))
+                        *(reference if reference is not None else (None, None)), breslow=breslow))
             logging.info(self._fold_summary(kfold, summary_path.split("/")[0], scenario, test_metrics_dict, task_type))
             if task_type == "Survival":
                 self._km_plot(test_df["all_original_event_times"], 1 - test_df["all_censorships"], test_df["all_risk_scores"],
@@ -798,7 +1128,8 @@ class ModelManager():
                 fold_result=test_metrics_dict,
                 fold_num=int(kfold.split('_')[1]) if kfold else 0,
                 predictions=test_df[["patient_ids", "dataset_name", "all_risk_scores", "all_censorships", "all_original_event_times",
-                                     "all_event_times", "survival_predictions"]]   # true time bin and hazard logits
+                                     "all_event_times", "survival_predictions"]
+                                    + (["avail_pattern"] if "avail_pattern" in test_df else [])]   # true time bin and hazard logits
                             if task_type == "Survival" else None,
             )
 
@@ -944,9 +1275,9 @@ class ModelManager():
                 if task_type == "Survival":
                     # c-index of the out-of-fold predictions of all folds together, overall and per dataset
                     for key, value in metrics.items():
-                        if key.endswith("c-index_pooled") or key == "cohort_gap":
+                        if key.endswith("c-index_pooled") or key == "cohort_gap":   # incl. c-index_stratified_pooled
                             new_row[key] = np.round(value, 3)
-                    for key in ["c-index_uno_mean", "c-index_uno_std", "IBS_mean", "IBS_std", "D-cal_p_mean", "D-cal_p_std",
+                    for key in ["c-index_stratified_mean", "c-index_stratified_std", "c-index_uno_mean", "c-index_uno_std", "IBS_mean", "IBS_std", "D-cal_p_mean", "D-cal_p_std",
                                 "D-cal_stat_mean", "D-cal_stat_std"]:
                         if key in metrics:
                             new_row[key] = np.round(metrics[key], 4)
@@ -1011,6 +1342,8 @@ class ModelManager():
         if events.empty or "survival_predictions" not in events:
             return
         logits = np.stack(events["survival_predictions"].values).astype(float)
+        if logits.shape[1] == 1:   # Cox head: no time bins
+            return
         hazards = 1 / (1 + np.exp(-logits))
         survival_prev = np.concatenate([np.ones((len(hazards), 1)), np.cumprod(1 - hazards, axis=1)[:, :-1]], axis=1)
         predicted = (survival_prev * hazards).argmax(axis=1)          # most likely event bin
@@ -1081,7 +1414,7 @@ class ModelManager():
             if "Confusion_Matrix" in metrics:
                 wandb.log({f"{prefix}/{tag}/Confusion_Matrix": wandb.Image(metrics["Confusion_Matrix"])})
             if task_type == "Survival" and self.results_store.predictions[scenario][model_version]:
-                oof = pd.concat(self.results_store.predictions[scenario][model_version], ignore_index=True)
+                oof = self.results_store.pooled_predictions(scenario, model_version)
                 p_value = self._km_plot(oof["all_original_event_times"], 1 - oof["all_censorships"], oof["all_risk_scores"],
                                         self.config.parent_directory, model_version, scenario, "aggregated", folds=oof["fold"])
                 metrics["km_logrank_p_pooled"] = p_value

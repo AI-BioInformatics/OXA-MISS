@@ -59,13 +59,46 @@ def survival_at_edges(logits):
     return np.concatenate([np.ones((len(hazards), 1)), np.cumprod(1 - hazards, axis=1)], axis=1)
 
 
-def survival_at(S_edges, edges, times):
+def survival_at(S_edges, edges, times, per_patient=None):
     """Survival of each patient at times (N,) or at a common grid (T,) -> (N,) or (N, T): linear
-    interpolation of the curve between the bin edges (days), constant outside."""
+    interpolation of the curve between the bin edges (days), constant outside. per_patient=None guesses from
+    the length (ambiguous when T == N): extended_survival_metrics passes it explicitly."""
     edges = np.asarray(edges, dtype=float)
-    if np.ndim(times) == 1 and len(times) == len(S_edges):
+    if per_patient is None:
+        per_patient = np.ndim(times) == 1 and len(times) == len(S_edges)
+    if per_patient:
         return np.array([np.interp(t, edges, s) for t, s in zip(times, S_edges)])
     return np.stack([np.interp(times, edges, s) for s in S_edges])
+
+
+def breslow_baseline(risk, times, events):
+    """Breslow cumulative baseline hazard of a Cox model from the log hazard ratios of the training patients:
+    H0(t) = sum over event times t_k <= t of d_k / sum_{j: t_j >= t_k} exp(r_j). The risks are shifted by
+    their maximum (no overflow); breslow_survival applies the same shift."""
+    risk = np.asarray(risk, dtype=float).reshape(-1)
+    times = np.asarray(times, dtype=float).reshape(-1)
+    events = np.asarray(events, dtype=bool).reshape(-1)
+    offset = float(risk.max())
+    w = np.exp(risk - offset)
+    event_times = np.unique(times[events])
+    increments = np.array([events[times == t].sum() / w[times >= t].sum() for t in event_times])
+    return {"times": event_times, "cumhaz": np.cumsum(increments), "offset": offset}
+
+
+def breslow_survival(breslow, risk, times, per_patient=None):
+    """S(t | x) = exp(-H0(t) exp(r)) of each patient (risk (N,)) at times (N,) -> (N,), one time per patient,
+    or at a common grid (T,) -> (N, T), as survival_at. H0 is a step function, 0 before the first event."""
+    risk = np.asarray(risk, dtype=float).reshape(-1)
+    times = np.asarray(times, dtype=float)
+    def H0(t):
+        k = np.searchsorted(breslow["times"], t, side="right") - 1
+        return np.where(k >= 0, breslow["cumhaz"][np.clip(k, 0, None)], 0.0)
+    w = np.exp(risk - breslow["offset"])
+    if per_patient is None:
+        per_patient = np.ndim(times) == 1 and len(times) == len(risk)
+    if per_patient:
+        return np.exp(-H0(times) * w)
+    return np.exp(-np.outer(w, H0(times)))
 
 
 def _surv(events, times):
@@ -73,10 +106,13 @@ def _surv(events, times):
     return Surv.from_arrays(event=np.asarray(events, dtype=bool), time=np.asarray(times, dtype=float))
 
 
-def extended_survival_metrics(logits, censorships, times, edges, train_censorships=None, train_times=None):
+def extended_survival_metrics(logits, censorships, times, edges, train_censorships=None, train_times=None,
+                              breslow=None):
     """Uno's c-index (IPCW, censoring from the training patients), integrated Brier score and D-calibration
     (Haider et al., JMLR 2020: chi-square p-value, > 0.05 = calibrated) of a test set. NaN when undefined.
-    Without training patients the censoring distribution is estimated on the test set itself."""
+    Without training patients the censoring distribution is estimated on the test set itself.
+    logits (N, K): discrete-time hazard logits, curves on the bin edges. With breslow (breslow_baseline of the
+    training set) logits are the (N, 1) log hazard ratios of a Cox model and the curves are Breslow's."""
     from sksurv.metrics import concordance_index_ipcw, integrated_brier_score
     from scipy.stats import chisquare
     events = 1 - np.asarray(censorships, dtype=int)
@@ -85,8 +121,13 @@ def extended_survival_metrics(logits, censorships, times, edges, train_censorshi
         train_censorships, train_times = censorships, times
     train = _surv(1 - np.asarray(train_censorships, dtype=int), train_times)
     test = _surv(events, times)
-    S_edges = survival_at_edges(logits)
-    risk = -S_edges.sum(axis=1)
+    if breslow is not None:
+        risk = np.asarray(logits, dtype=float).reshape(len(times), -1)[:, 0]
+        survival = lambda t, own: breslow_survival(breslow, risk, t, per_patient=own)
+    else:
+        S_edges = survival_at_edges(logits)
+        risk = -S_edges.sum(axis=1)
+        survival = lambda t, own: survival_at(S_edges, edges, t, per_patient=own)
     out = {"c-index_uno": np.nan, "IBS": np.nan, "D-cal_p": np.nan, "D-cal_stat": np.nan}
     # time range where the censoring distribution of the training set is defined
     t_max = min(np.max(train_times), np.percentile(times, 95))
@@ -96,11 +137,11 @@ def extended_survival_metrics(logits, censorships, times, edges, train_censorshi
         logging.warning(f"Uno c-index undefined: {e}")
     try:
         grid = np.linspace(np.percentile(times, 5), t_max, 50, endpoint=False)
-        out["IBS"] = float(integrated_brier_score(train, test, survival_at(S_edges, edges, grid), grid))
+        out["IBS"] = float(integrated_brier_score(train, test, survival(grid, False), grid))
     except Exception as e:
         logging.warning(f"IBS undefined: {e}")
     # D-calibration: S_i(t_i) uniform on [0, 1]; a censored patient spreads its mass over [0, S_i(c_i)]
-    s = np.clip(survival_at(S_edges, edges, times), 1e-12, 1.0)
+    s = np.clip(survival(times, True), 1e-12, 1.0)
     n_bins = 10
     lower = np.arange(n_bins) / n_bins
     counts = np.zeros(n_bins)
@@ -128,6 +169,33 @@ def safe_c_index(censorships, event_times, risk_scores):
     except NoComparablePairException:  # events, but none before another patient's time (e.g. a few patients)
         logging.warning(f"c-index undefined ({len(events)} patients, {int(events.sum())} events, no comparable pairs): set to NaN")
         return np.nan
+
+
+def cancer_type_of(dataset_name):
+    """Harmonized cancer type (TCGA code) of a dataset name, the dataloader's mapping (CPTAC_CCRCC -> KIRC, ...)."""
+    from dataloader.dataloader_multidataset import Multimodal_Bio_Dataset
+    return Multimodal_Bio_Dataset.cancer_type(dataset_name)
+
+
+def stratified_c_index(censorships, event_times, risk_scores, strata):
+    """Harrell's c-index with comparable pairs only WITHIN a stratum (the cancer type): concordant (+ 0.5 per
+    tied risk) over comparable pairs, both summed over the strata. Pairs between cancer types are left out, so
+    recognizing the cancer type (whose prognosis differs) gives no credit. One stratum = the plain c-index.
+    NaN without comparable pairs."""
+    events = (1 - np.asarray(censorships)).astype(bool)
+    times, risks, strata = np.asarray(event_times), np.asarray(risk_scores), np.asarray(strata)
+    concordant = comparable = 0.0
+    for s in np.unique(strata):
+        idx = strata == s
+        if idx.sum() < 2 or not events[idx].any():
+            continue
+        try:
+            _, conc, disc, tied_risk, _ = concordance_index_censored(events[idx], times[idx], risks[idx], tied_tol=1e-08)
+        except NoComparablePairException:
+            continue
+        concordant += conc + 0.5 * tied_risk
+        comparable += conc + disc + tied_risk
+    return concordant / comparable if comparable > 0 else np.nan
 
 import importlib.util
 import sys
@@ -282,21 +350,47 @@ class ResultsStore:
         if predictions is not None:
             self.predictions[scenario][model_version].append(predictions.assign(fold=self.current_fold))
 
+    @staticmethod
+    def is_external(scenario):
+        return scenario == "external" or scenario.startswith("external/")
+
+    def pooled_predictions(self, scenario, model_version):
+        """Predictions of all folds together. Internal test: the out-of-fold predictions (every patient in one
+        test fold). External test (every fold model predicts the same patients): one row per patient, the
+        ensemble of the fold models = mean of each model's risks z-scored over the external patients (the
+        risk scale / offset differs between the fold models), fold = "ensemble"."""
+        folds = self.predictions[scenario][model_version]
+        if not folds:
+            return pd.DataFrame()
+        df = pd.concat(folds, ignore_index=True)
+        if not self.is_external(scenario):
+            return df
+        z = df.groupby("fold")["all_risk_scores"].transform(lambda r: (r - r.mean()) / (r.std() if r.std() > 0 else 1.0))
+        extra = {"avail_pattern": ("avail_pattern", "first")} if "avail_pattern" in df else {}
+        ens = df.assign(all_risk_scores=z).groupby(["dataset_name", "patient_ids"], as_index=False).agg(
+            all_risk_scores=("all_risk_scores", "mean"), all_censorships=("all_censorships", "first"),
+            all_original_event_times=("all_original_event_times", "first"), all_event_times=("all_event_times", "first"),
+            **extra)
+        return ens.assign(fold="ensemble")
+
     def pooled_c_index(self, scenario, model_version):
         """c-index of the out-of-fold predictions of all folds together (every patient is in one test fold):
         more reliable than the mean over folds when a subset has few events per fold (e.g. MRI patients),
-        also per dataset. Risks of different folds come from different models."""
-        folds = self.predictions[scenario][model_version]
-        if not folds:
+        also per dataset. Risks of different folds come from different models. External test: c-index of the
+        ensemble of the fold models (pooled_predictions)."""
+        df = self.pooled_predictions(scenario, model_version)
+        if df.empty:
             return {}
-        df = pd.concat(folds, ignore_index=True)
         pooled = {"c-index_pooled": safe_c_index(df["all_censorships"], df["all_original_event_times"], df["all_risk_scores"])}
+        pooled["c-index_stratified_pooled"] = stratified_c_index(
+            df["all_censorships"], df["all_original_event_times"], df["all_risk_scores"],
+            df["dataset_name"].map(cancer_type_of))
         if df["dataset_name"].nunique() > 1:
             for dataset, d in df.groupby("dataset_name"):
                 pooled[f"{dataset}_c-index_pooled"] = safe_c_index(d["all_censorships"], d["all_original_event_times"], d["all_risk_scores"])
             # pooled - mean within-cohort c-index: > 0 = part of the pooled ranking comes from differences
             # BETWEEN cohorts (e.g. the model recognizing the cohort), not from ranking patients within each
-            within = [v for k, v in pooled.items() if k != "c-index_pooled" and not np.isnan(v)]
+            within = [v for k, v in pooled.items() if k not in ("c-index_pooled", "c-index_stratified_pooled") and not np.isnan(v)]
             pooled["cohort_gap"] = pooled["c-index_pooled"] - np.mean(within) if within else np.nan
         return pooled
         
@@ -320,9 +414,10 @@ class ResultsStore:
         if not folds:
             return pd.DataFrame()
         df = pd.concat(folds, ignore_index=True)
+        pooled_df = self.pooled_predictions(scenario, model_version)   # external: ensemble of the fold models
         rows = []
         for dataset, d in df.groupby("dataset_name"):
-            for fold, g in list(d.groupby("fold")) + [("pooled", d)]:
+            for fold, g in list(d.groupby("fold")) + [("pooled", pooled_df[pooled_df["dataset_name"] == dataset])]:
                 rows.append({"dataset": dataset, "fold": str(fold), "patients": len(g),
                              "events": int((g["all_censorships"] == 0).sum()),
                              "c-index": safe_c_index(g["all_censorships"], g["all_original_event_times"], g["all_risk_scores"])})
@@ -341,13 +436,17 @@ class ResultsStore:
                     "c-index_list": c_indices,
                     **self.pooled_c_index(scenario, model_version),
                 }
-                for key in ("c-index_uno", "IBS", "D-cal_p", "D-cal_stat"):   # D-cal_stat: chi-square, lower = better calibrated
+                for key in ("c-index_stratified", "c-index_uno", "IBS", "D-cal_p", "D-cal_stat"):   # D-cal_stat: chi-square, lower = better calibrated
                     if all(key in r for r in fold_results):
                         values = [r[key] for r in fold_results]
                         metrics[f"{key}_mean"], metrics[f"{key}_std"] = np.nanmean(values), np.nanstd(values)
                 if all("n_patients" in r for r in fold_results):
-                    metrics["n_patients"] = int(sum(r["n_patients"] for r in fold_results))
-                    metrics["n_events"] = int(sum(r["n_events"] for r in fold_results))
+                    if self.is_external(scenario):   # the same patients in every fold: count them once
+                        ens = self.pooled_predictions(scenario, model_version)
+                        metrics["n_patients"], metrics["n_events"] = len(ens), int((ens["all_censorships"] == 0).sum())
+                    else:
+                        metrics["n_patients"] = int(sum(r["n_patients"] for r in fold_results))
+                        metrics["n_events"] = int(sum(r["n_events"] for r in fold_results))
             
             elif task_type == "Treatment_Response":
                 aucs = [r["AUC"] for r in fold_results]

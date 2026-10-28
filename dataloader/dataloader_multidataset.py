@@ -15,12 +15,39 @@ import glob
 import bisect
 import csv
 import re
+import h5py
 
 DEFAULT_CT_MAPPING = '/work/H2020DeciderFicarra/ccRCC/CT_mapping.csv'
 DEFAULT_MRI_MAPPING = '/work/H2020DeciderFicarra/ccRCC/MRI_mapping.csv'
 # patient id at the start of a radiology file name: TCGA (TCGA-AY-4070A.npz -> TCGA-AY-4070) or CPTAC
 CASE_ID_PATTERN = re.compile(r'(TCGA-[A-Z0-9]{2}-[A-Z0-9]{4}|C3[LN]-\d{5})')
 DEFAULT_RADIOLOGY_REGISTRY = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'config', 'radiology.yaml')
+# WSI patch features: CLAM writes the same (N patches, dim) matrix to pt_files/<slide>.pt and h5_files/<slide>.h5
+# ('features' + 'coords'); utils/convert_features_fp16.py writes float16 copies <slide>.npy (features_UNIv2_fp16).
+# The dataset yamls' pt_files_path may point to any of these folders (first found: .npy, .pt, .h5).
+WSI_FEATURE_EXTS = ('.npy', '.pt', '.h5')
+RADIOLOGY_TOKEN_FILTERS = ('valid', 'roi', 'none')
+
+
+def load_wsi_bag_in_memory(path):
+    """(N patches, dim) tensor of a slide read entirely into the process memory (anonymous, not page cache):
+    the slide cache (load_slides_in_RAM). On BeeGFS the page cache does not keep the memory-mapped .npy across
+    epochs (measured 2026-10-28: ~80 MB/s of disk reads in every epoch), so the cache holds private copies."""
+    if path.endswith('.npy'):
+        return torch.from_numpy(np.load(path))
+    return load_wsi_bag(path)
+
+
+def load_wsi_bag(path):
+    """(N patches, dim) tensor of a slide: float16 .npy (memory-mapped, copy-on-write: the tensor reads the file
+    through the page cache, shared by the jobs of a node, and is never written back), CLAM .pt (torch tensor)
+    or .h5 ('features' dataset)."""
+    if path.endswith('.npy'):
+        return torch.from_numpy(np.load(path, mmap_mode='c'))
+    if path.endswith('.h5'):
+        with h5py.File(path, 'r') as f:
+            return torch.from_numpy(f['features'][:])
+    return torch.load(path, weights_only=True, map_location="cpu")
 
 
 
@@ -49,12 +76,31 @@ class Multimodal_Bio_Dataset(Dataset):
                         radiology_registry=DEFAULT_RADIOLOGY_REGISTRY,
                         clinical_tokens=None,
                         radiology_tokens=False,
+                        radiology_token_filter='valid',
+                        radiology_token_meta=False,
+                        wsi_representation='patches',
+                        wsi_gmm_dir=None,
+                        external_datasets=(),
                         ):
         self.model_name = model_name
-        # radiology_tokens: CT / MRI as token matrices (N regions, dim) from the unpooled encoder outputs
-        # (radiology registry unpooled_root), for a model with its own radiology encoder (OXA_MISS_final);
-        # otherwise one mean-pooled vector per exam
+        # names of the datasets loaded only as external test sets (data_loader.external_test_configs): in no
+        # fold, and left out of the survival bins, so that adding them changes nothing of the internal run
+        self.external_datasets = set(external_datasets)
+        # radiology_tokens: CT / MRI as token matrices (N regions, dim) from the encoder outputs of the radiology
+        # registry, for a model with its own radiology attention pooling (OXA_MISS_final). The mean-pooled vectors
+        # of the non-token models are no longer produced: with radiology_encoders, CT / MRI need radiology_tokens.
         self.radiology_tokens = radiology_tokens
+        # tokens kept per exam, from <case>_tokens.npz of the radiomics pipeline (same token order as <case>.pt):
+        #   'valid' -> drop the padding-only tokens (valid_fraction == 0, ~50% of them), no information lost
+        #   'roi'   -> keep the tokens touching the ROI = organ dilated by 20 mm (roi_fraction > 0)
+        #   'none'  -> all the tokens
+        if radiology_token_filter not in RADIOLOGY_TOKEN_FILTERS:
+            raise ValueError(f"radiology_token_filter {radiology_token_filter!r}: one of {list(RADIOLOGY_TOKEN_FILTERS)}")
+        self.radiology_token_filter = radiology_token_filter
+        # radiology_token_meta (set by main.py when the model uses radiology_occ_bias / radiology_pos_enc): also
+        # ct_token_meta / mri_token_meta (N, 4) per kept token = (x, y, z) centre of the token in [0, 1] of the
+        # exam's token grid, organ_fraction
+        self.radiology_token_meta = radiology_token_meta
         # {CT: <encoder>, MRI: <encoder>} of config/radiology.yaml for all the datasets (None: the ct_path /
         # mri_path of each dataset yaml)
         self.radiology_encoders = dict(radiology_encoders or {})
@@ -65,6 +111,9 @@ class Multimodal_Bio_Dataset(Dataset):
                        if m not in self.radiology_registry['encoders'] or e not in self.radiology_registry['encoders'][m]}
             if unknown:
                 raise ValueError(f"radiology_encoders {unknown} not in {radiology_registry}: {self.radiology_registry['encoders']}")
+        if self.radiology_encoders and not radiology_tokens and any(m in input_modalities for m in ('CT', 'MRI')):
+            raise ValueError("CT / MRI from config/radiology.yaml are token matrices only (no mean-pooled features): "
+                             "the model must take radiology tokens (data_loader.radiology_tokens, set by main.py)")
         if radiology_tokens and not self.radiology_encoders and any(m in input_modalities for m in ('CT', 'MRI')):
             raise ValueError("radiology_tokens needs data_loader.radiology_encoders (the unpooled features are found "
                              "through config/radiology.yaml)")
@@ -83,6 +132,18 @@ class Multimodal_Bio_Dataset(Dataset):
         self.genomics_group_name = list(genomics_group_name or [])
         self.cnv_group_name = list(cnv_group_name or [])
         self.task_type = task_type
+        # wsi_representation 'gmm': the WSI of a patient is its (K, 1 + 2 D) GMM prototype matrix of the current
+        # fold (utils/fit_wsi_gmm.py, wsi_gmm_dir/fold<k>.npy, memory-mapped; set_wsi_gmm_fold per fold)
+        # instead of its patches; the slides are then not cached in RAM
+        if wsi_representation not in ('patches', 'gmm'):
+            raise ValueError(f"wsi_representation {wsi_representation}: patches | gmm")
+        self.wsi_representation, self.wsi_gmm_dir, self.wsi_gmm = wsi_representation, wsi_gmm_dir, None
+        if wsi_representation == 'gmm':
+            if not wsi_gmm_dir or not os.path.exists(os.path.join(wsi_gmm_dir, 'patients.csv')):
+                raise FileNotFoundError(f"wsi_representation gmm: no {wsi_gmm_dir}/patients.csv (utils/fit_wsi_gmm.py)")
+            rows = pd.read_csv(os.path.join(wsi_gmm_dir, 'patients.csv'), dtype={'case_id': str})
+            self.wsi_gmm_row = {(d, c): i for i, (d, c) in enumerate(zip(rows['dataset_name'], rows['case_id']))}
+            load_slides_in_RAM = False
         self.load_slides_in_RAM = load_slides_in_RAM
         self.robust_training = False
         # missing WSI: (1, dim) placeholder instead of (max_patches, dim) zeros; safe only if every batch has
@@ -219,7 +280,11 @@ class Multimodal_Bio_Dataset(Dataset):
                 with open(genomics_path, newline='') as fh:  # pd.read_csv(nrows=0) takes seconds on 20k columns
                     header = next(csv.reader(fh, delimiter=sep))
                 wanted_genes = set(g for key in self.genomics_group_name for g in self.genes_groups[key]["ensg_gene_id"])
-                id_cols = [c for c in header if c in ('patient', 'Unnamed: 0')]
+                # patient column: 'patient', or an unnamed first column (empty header, e.g. TCGA HNSC tpm), which
+                # pandas reads as 'Unnamed: 0'
+                id_cols = ['patient'] if 'patient' in header else []
+                if header[0] in ('', 'Unnamed: 0'):
+                    id_cols.append('Unnamed: 0')
                 gene_cols = [c for c in header if c not in id_cols and c.split('.')[0] in wanted_genes]
                 # explicit dtypes: pandas usecols by name is slower than a full read without them
                 genomics = pd.read_csv(genomics_path, sep=sep, usecols=id_cols + gene_cols,
@@ -247,7 +312,9 @@ class Multimodal_Bio_Dataset(Dataset):
                 genomics = genomics.loc[:, ~((genomics.columns.duplicated(keep='first')) & genomics.apply(lambda col: (col == 0).all()))]
 
                 print("Genomics shape: ", genomics.shape)
-                genomics = np.log(genomics+0.1)
+                # log2(TPM + 1), the standard transform (before 2026-10-28: natural log(TPM + 0.1), which stretched
+                # the near-zero genes); then the per-gene z-score fitted on the training patients (normalize_genomics)
+                genomics = np.log2(genomics + 1)
 
             if hasattr(config.parameters, 'cnv_path'):
                 cnv = pd.read_csv(config.parameters.cnv_path, sep="\t").set_index("patient")
@@ -382,10 +449,19 @@ class Multimodal_Bio_Dataset(Dataset):
         self.site_names = sorted(set(self.site_of.values()))
         self.site_index_of = {site: i for i, site in enumerate(self.site_names)}
 
+    # CPTAC cohort -> TCGA cancer type (the CPTAC studies name the same tumors differently)
+    CPTAC_CANCER_TYPE = {"CCRCC": "KIRC", "LSCC": "LUSC", "PDA": "PAAD"}
+
     @staticmethod
     def cancer_type(dataset_name):
-        """Cancer type of a dataset name: CPTAC (ccRCC) -> KIRC, TCGA_<X>[RED] -> X."""
-        return "KIRC" if dataset_name == "CPTAC" else dataset_name.replace("TCGA_", "").replace("RED", "")
+        """Cancer type (TCGA code) of a dataset name: TCGA_<X>[RED] -> X, CPTAC_<C> -> C mapped to TCGA
+        (CCRCC -> KIRC, LSCC -> LUSC, PDA -> PAAD), legacy CPTAC (ccRCC only) -> KIRC."""
+        if dataset_name == "CPTAC":
+            return "KIRC"
+        if dataset_name.startswith("CPTAC_"):
+            cohort = dataset_name[len("CPTAC_"):]
+            return Multimodal_Bio_Dataset.CPTAC_CANCER_TYPE.get(cohort, cohort)
+        return dataset_name.replace("TCGA_", "").replace("RED", "")
 
     @staticmethod
     def _read_exam_mapping(path):
@@ -398,14 +474,14 @@ class Multimodal_Bio_Dataset(Dataset):
         tumor = registry['tumor_folders'].get(dataset_name)
         if tumor is None:
             return None
-        root = registry['unpooled_root'] if self.radiology_tokens else registry['root']
-        folder = os.path.join(root, registry['encoders'][modality][self.radiology_encoders[modality]], tumor)
+        folder = os.path.join(registry['root'], registry['encoders'][modality][self.radiology_encoders[modality]], tumor)
         return folder if os.path.isdir(folder) else None
 
     def _scan_exams(self, folder):
         """case_id -> exam file of a features folder (<case_id>.<ext>, or <case_id><suffix>.<ext>, e.g.
-        TCGA-AY-4070A; .pt token matrices with radiology_tokens, else .npz mean-pooled vectors). One exam per
-        patient: a patient with several files is an error (they would need a mapping csv)."""
+        TCGA-AY-4070A; .pt token matrices with radiology_tokens, else .npz mean-pooled vectors of the legacy
+        ct_path / mri_path folders). The <case>_tokens.npz metadata files are not exams (they end in .npz but
+        never in token mode). One exam per patient: several files for a patient is an error (mapping csv)."""
         ext = '.pt' if self.radiology_tokens else '.npz'
         files = sorted(f for f in os.listdir(folder) if f.endswith(ext))
         exams = {}
@@ -443,8 +519,43 @@ class Multimodal_Bio_Dataset(Dataset):
         paths, exams = (self.ct_paths, self.ct_exams) if modality == 'CT' else (self.mri_paths, self.mri_exams)
         path = os.path.join(paths[dataset_name], exams[dataset_name][case_id])
         if self.radiology_tokens:
-            return load_radiology_tokens(path)
+            return self._filter_radiology_tokens(load_radiology_tokens(path), path)
         return torch.from_numpy(np.squeeze(np.load(path)['arr_0'], axis=(1, 3)))
+
+    @staticmethod
+    def _token_meta(info):
+        """(N, 4) float32: token centre in [0, 1] of the exam's token grid (grid position = block_index x tokens
+        per block + token_index, per axis; tokens per block read from the exam: 3x3x3 SuPreM, 3x3x6 MRSeg), and
+        organ_fraction."""
+        block, token = info['block_index'].astype(np.int64), info['token_index'].astype(np.int64)
+        position = block * (token.max(axis=0) + 1) + token
+        extent = position.max(axis=0) + 1
+        xyz = (position + 0.5) / extent
+        return np.concatenate([xyz, info['organ_fraction'][:, None]], axis=1).astype(np.float32)
+
+    def _filter_radiology_tokens(self, tokens, path):
+        """Tokens of an exam kept by radiology_token_filter, using <case>_tokens.npz next to <case>.pt. An exam
+        whose filter would keep nothing falls back to its non-padding tokens, then to all of them.
+        With radiology_token_meta: (tokens, meta of the kept tokens)."""
+        if self.radiology_token_filter == 'none' and not self.radiology_token_meta:
+            return tokens
+        info_path = path[:-len('.pt')] + '_tokens.npz'
+        if not os.path.exists(info_path):
+            raise FileNotFoundError(f"radiology_token_filter={self.radiology_token_filter!r}: no token metadata {info_path}")
+        info = np.load(info_path)
+        valid = info['valid_fraction'] > 0
+        if len(valid) != tokens.shape[0]:
+            raise ValueError(f"{info_path}: {len(valid)} token entries for {tokens.shape[0]} tokens in {path}")
+        if self.radiology_token_filter == 'none':
+            keep = np.ones_like(valid)
+        else:
+            keep = valid & (info['roi_fraction'] > 0) if self.radiology_token_filter == 'roi' else valid
+            if not keep.any():
+                keep = valid if valid.any() else np.ones_like(valid)
+        kept = tokens[torch.from_numpy(keep)]
+        if self.radiology_token_meta:
+            return kept, torch.from_numpy(self._token_meta(info)[keep])
+        return kept
 
     def _placeholder_shape(self, modality, dataset_name):
         """Shape of the zero features of a missing CT/MRI: the embedding size of the run's features."""
@@ -498,7 +609,7 @@ class Multimodal_Bio_Dataset(Dataset):
         self.patient_dict = {patient: slides_by_patient.get(patient, []) for patient in self.patient_list}
 
     def _find_slides_on_disk(self):
-        """patient -> .pt files (names without extension) of the patient's slides in their dataset folder.
+        """patient -> feature files (.pt or .h5, names without extension) of the patient's slides in their dataset folder.
         A slide of the label file is matched by exact name, otherwise by name prefix: a row with
         slide_id == case_id stands for all the slides of the patient, so every matching file is used."""
         pt_stems = {}
@@ -506,7 +617,7 @@ class Multimodal_Bio_Dataset(Dataset):
             folder = params.get('pt_files_path')
             stems = []
             if folder is not None and os.path.isdir(folder):
-                stems = sorted(f[:-3] for f in os.listdir(folder) if f.endswith('.pt'))
+                stems = sorted({os.path.splitext(f)[0] for f in os.listdir(folder) if f.endswith(WSI_FEATURE_EXTS)})
             pt_stems[dataset_name] = stems
         slides_on_disk = {}
         for pid, row in self.patient_df.iterrows():
@@ -646,10 +757,12 @@ class Multimodal_Bio_Dataset(Dataset):
         return {'rows': rows, 'arrays': arrays}
 
     def _compute_labels(self):
-        uncensored_df = self.patient_df[(self.patient_df["censorship"] == 0)]# & (self.patient_df['complete'] == True)]
+        # bins from the development datasets only (external test sets excluded)
+        development = self.patient_df[~self.patient_df["dataset_name"].isin(self.external_datasets)]
+        uncensored_df = development[(development["censorship"] == 0)]# & (self.patient_df['complete'] == True)]
         disc_labels, q_bins = pd.qcut(uncensored_df["time"], q=self.n_bins, retbins=True, labels=False, duplicates='drop')
-        q_bins[-1] = self.patient_df["time"].max() + self.eps
-        q_bins[0] = self.patient_df["time"].min() - self.eps
+        q_bins[-1] = development["time"].max() + self.eps
+        q_bins[0] = development["time"].min() - self.eps
         
         # assign patients to different bins according to their months' quantiles (on all data)
         # cut will choose bins so that the values of bins are evenly spaced. Each bin may have different frequncies
@@ -665,27 +778,68 @@ class Multimodal_Bio_Dataset(Dataset):
         self.patient_df.insert(2, 'label', safe_binning(self.patient_df["time"], q_bins))
         self.bins = q_bins
 
-    def _slide_path(self, pt_files_path, slide_id):
-        wsi_path = os.path.join(pt_files_path, '{}.pt'.format(slide_id))
-        if not os.path.exists(wsi_path):
-            wsi_path = glob.glob(os.path.join(pt_files_path, f'{slide_id}*.pt'))[0]
-        return wsi_path
+    def set_wsi_gmm_fold(self, fold):
+        """wsi_representation gmm: the prototypes of fold `fold` (0-based, the order of kfold_split_files)."""
+        path = os.path.join(self.wsi_gmm_dir, f'fold{fold}.npy')
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"wsi_representation gmm: no prototypes {path}")
+        self.wsi_gmm = np.load(path, mmap_mode='r')
 
-    def _preload_slides(self):
-        """Loads all the slides of the dataset patients in RAM, once, in the main process.
-        DataLoader workers are forked from it and share these tensors (copy-on-write): filling the
-        cache inside the workers instead gives one private copy per worker and per DataLoader."""
-        total_bytes = 0
-        for pid in self.patient_df.index:
+    def _wsi_gmm_prototypes(self, dataset_name, case_id):
+        if self.wsi_gmm is None:
+            raise RuntimeError("wsi_representation gmm: set_wsi_gmm_fold() not called for this fold")
+        row = self.wsi_gmm_row.get((dataset_name, case_id))
+        if row is None:
+            raise KeyError(f"wsi_representation gmm: {dataset_name}/{case_id} has WSI but no prototypes in {self.wsi_gmm_dir}")
+        return torch.from_numpy(np.asarray(self.wsi_gmm[row], dtype=np.float32))
+
+    def _slide_path(self, pt_files_path, slide_id):
+        """Feature file of a slide in pt_files_path: exact name first, then name prefix; .pt before .h5."""
+        for ext in WSI_FEATURE_EXTS:
+            wsi_path = os.path.join(pt_files_path, f'{slide_id}{ext}')
+            if os.path.exists(wsi_path):
+                return wsi_path
+        for ext in WSI_FEATURE_EXTS:
+            matches = sorted(glob.glob(os.path.join(pt_files_path, f'{glob.escape(slide_id)}*{ext}')))
+            if matches:
+                return matches[0]
+        raise FileNotFoundError(f"No .pt / .h5 features for slide {slide_id} in {pt_files_path}")
+
+    PRELOAD_THREADS = 8   # parallel readers: the BeeGFS throughput adds up over concurrent reads
+
+    def _preload_slides(self, external=False):
+        """Reads the slides of the internal datasets' patients (external=True: of the external datasets) into the
+        process memory, once, in the main process, with PRELOAD_THREADS parallel readers. DataLoader workers are
+        forked from it and share these tensors (copy-on-write): filling the cache inside the workers instead gives
+        one private copy per worker and per DataLoader. The external slides are read at the end of the run, in
+        place of the internal ones (reload_slide_cache, main.py evaluate_external_at_end)."""
+        from concurrent.futures import ThreadPoolExecutor
+        import time
+        selected = self.patient_df["dataset_name"].isin(self.external_datasets)
+        if not external:
+            selected = ~selected
+        todo = {}
+        for pid in self.patient_df.index[selected]:
             pt_files_path = self.datasets[self.patient_df.loc[pid, "dataset_name"]].pt_files_path
             for slide_id in self.slides_on_disk[pid]:
                 if slide_id not in self.slides_cache:
-                    wsi_bag = torch.load(self._slide_path(pt_files_path, slide_id), weights_only=True, map_location="cpu")
-                    wsi_bag = wsi_bag.to(self.slides_cache_dtype)
-                    self.slides_cache[slide_id] = wsi_bag
-                    total_bytes += wsi_bag.element_size() * wsi_bag.nelement()
-        print(f"Preloaded {len(self.slides_cache)} slides in RAM as {str(self.slides_cache_dtype).replace('torch.', '')} "
-              f"({total_bytes / 1024**3:.1f} GB)")
+                    todo[slide_id] = self._slide_path(pt_files_path, slide_id)
+        start = time.time()
+        with ThreadPoolExecutor(max_workers=self.PRELOAD_THREADS) as pool:
+            for slide_id, wsi_bag in zip(todo, pool.map(load_wsi_bag_in_memory, todo.values())):
+                self.slides_cache[slide_id] = wsi_bag.to(self.slides_cache_dtype)
+        total_bytes = sum(self.slides_cache[s].element_size() * self.slides_cache[s].nelement() for s in todo)
+        print(f"Preloaded {len(todo)} {'external' if external else 'internal'} slides in RAM as "
+              f"{str(self.slides_cache_dtype).replace('torch.', '')} ({total_bytes / 1024**3:.1f} GB, "
+              f"{time.time() - start:.0f} s, {total_bytes / 1e6 / max(time.time() - start, 1e-6):.0f} MB/s)")
+
+    def reload_slide_cache(self, external):
+        """Empties the slide cache and preloads the internal (external=False) or external slides in its place:
+        one cohort set in memory at a time."""
+        import gc
+        self.slides_cache.clear()
+        gc.collect()
+        self._preload_slides(external=external)
 
     def _load_wsi_embs_from_path(self, dataset_name, slide_names):
             """
@@ -709,13 +863,13 @@ class Multimodal_Bio_Dataset(Dataset):
                     if slide_id in self.slides_cache:
                         wsi_bag = self.slides_cache[slide_id]
                         num_patches = wsi_bag.shape[0]
-                    else:
-                        wsi_bag = torch.load(self._slide_path(pt_files_path, slide_id), weights_only=True, map_location="cpu")
+                    else:   # not preloaded (e.g. a slide outside the preloaded cohorts): read into memory once
+                        wsi_bag = load_wsi_bag_in_memory(self._slide_path(pt_files_path, slide_id))
                         wsi_bag = wsi_bag.to(self.slides_cache_dtype)
                         self.slides_cache[slide_id] = wsi_bag
                         num_patches = wsi_bag.shape[0]
                 else:
-                    wsi_bag = torch.load(self._slide_path(pt_files_path, slide_id), weights_only=True, map_location="cpu") # changed to True due to python warning
+                    wsi_bag = load_wsi_bag(self._slide_path(pt_files_path, slide_id)) # changed to True due to python warning
                     num_patches = wsi_bag.shape[0]
                 patch_features.append(wsi_bag)
                 slides_str_descriptor += slide_id + "#" + str(num_patches) + "|"
@@ -773,6 +927,7 @@ class Multimodal_Bio_Dataset(Dataset):
         mri_feats = torch.zeros(self._placeholder_shape('MRI', row["dataset_name"]), dtype=torch.float32)
         clinical_feats = torch.zeros(self.clinical_data.shape[1] if hasattr(self, 'clinical_data') else 14, dtype=torch.float32)
         ct_status = mri_status = clinical_status = False
+        ct_meta = torch.zeros((1, 4)); mri_meta = torch.zeros((1, 4))   # radiology_token_meta placeholders
         if isinstance(row, pd.DataFrame):
             print("⚠️ Più righe trovate con index, uso solo la prima:")
             row = row.iloc[0]
@@ -803,8 +958,12 @@ class Multimodal_Bio_Dataset(Dataset):
         # availability (has_*) is computed once at init, on the data of the patient's own dataset
         if available["CT"]:
             ct_feats = self._radiology_features('CT', dataset_name, index)
+            if self.radiology_token_meta:
+                ct_feats, ct_meta = ct_feats
         if available["MRI"]:
             mri_feats = self._radiology_features('MRI', dataset_name, index)
+            if self.radiology_token_meta:
+                mri_feats, mri_meta = mri_feats
         clinical_inputs = {}
         if self.clinical_tokens is not None:
             # raw values (age standardized in the model); missing / not a modality of this loader -> zeros
@@ -812,7 +971,11 @@ class Multimodal_Bio_Dataset(Dataset):
             clinical_inputs.pop("clinical_status")
         elif available["Clinical"]:
             clinical_feats = torch.tensor(self.clinical_data_per_dataset[dataset_name].loc[index].values.astype(np.float32))
-        if available["WSI"]:
+        if available["WSI"] and self.wsi_representation == 'gmm':
+            patch_features = self._wsi_gmm_prototypes(dataset_name, index)
+            mask = torch.zeros(patch_features.shape[0])
+            slides_str_descriptor = ""
+        elif available["WSI"]:
             patch_features, mask, slides_str_descriptor = self._load_wsi_embs_from_path(dataset_name, slide_list)
         else:
             n_placeholder = 1 if self.compact_missing_wsi else self.max_patches
@@ -863,6 +1026,7 @@ class Multimodal_Bio_Dataset(Dataset):
                             'ct_status': ct_status,
                             'mri_features': mri_feats,
                             'mri_status': mri_status,
+                            **({'ct_token_meta': ct_meta, 'mri_token_meta': mri_meta} if self.radiology_token_meta else {}),
                             "clinical_features": clinical_feats,
                             "clinical_status": clinical_status,
                             **clinical_inputs,
