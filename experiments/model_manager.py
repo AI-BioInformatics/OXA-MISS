@@ -692,6 +692,12 @@ class ModelManager():
         testLoss = []
         lowest_val_loss = np.inf
         highest_val_metric_monitor = -1
+        # checkpoint selection (trainer.selection_window / selection_min_epoch; 1 / 1 = the single-epoch rule):
+        # lowest / highest MEAN of the validation loss / metric over the last `window` epochs, the weights of the
+        # window's last epoch, only for epochs >= min_epoch with a full window
+        selection_window = int(self.config.trainer.get('selection_window', 1))
+        selection_min_epoch = int(self.config.trainer.get('selection_min_epoch', 1))
+        val_loss_history, val_metric_history = [], []
         STOP = False
         df_fold_suffix = f"_{kfold}" if kfold else ""
         log_fold_string = f"/{kfold}" if kfold else ""
@@ -864,9 +870,14 @@ class ModelManager():
                 self.scheduler.step()
             # Early stopping
             if eval_dataloader is not None:
+                val_loss_history.append(float(vloss))
+                val_metric_history.append(float(val_metric_monitor))
+                eligible = len(val_loss_history) >= selection_window and epoch + 1 >= selection_min_epoch
+                smoothed_loss = float(np.mean(val_loss_history[-selection_window:]))
+                smoothed_metric = float(np.mean(val_metric_history[-selection_window:]))
 
-                if val_metric_monitor > highest_val_metric_monitor:
-                    highest_val_metric_monitor = val_metric_monitor
+                if eligible and smoothed_metric > highest_val_metric_monitor:
+                    highest_val_metric_monitor = smoothed_metric
                     
                     highest_val_metric_monitor_epoch = epoch + 1
                     logging.info(
@@ -879,8 +890,10 @@ class ModelManager():
                         wandb.run.summary[f"Highest_Metric/Valid{log_fold_string}/{key}"] = value
 
 
-                if vloss < lowest_val_loss:
-                    lowest_val_loss = vloss
+                if not eligible:
+                    pass   # before selection_min_epoch / a full window: no checkpoint, no patience
+                elif smoothed_loss < lowest_val_loss:
+                    lowest_val_loss = smoothed_loss
                     patience_counter = 0
                     lowest_val_loss_epoch = epoch + 1
                     logging.info(
